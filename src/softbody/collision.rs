@@ -1,0 +1,206 @@
+//! Analytic collision against the procedural terrain. Because the terrain is a
+//! closed-form height field (`scene::terrain_height`), node collision is a cheap
+//! per-node sample with no broadphase — ideal for the high substep rate.
+
+use crate::scene::{self, ObstacleBox};
+use crate::softbody::structure::Nodes;
+
+// Penalty-contact tuning.
+const CONTACT_K: f32 = 120_000.0; // ground stiffness (N/m of penetration)
+const CONTACT_DAMP: f32 = 600.0; // normal velocity damping
+const FRICTION: f32 = 0.9; // Coulomb-ish tangential coefficient
+
+// Obstacle (box) + self-collision tuning.
+const OBSTACLE_K: f32 = 160_000.0;
+const OBSTACLE_DAMP: f32 = 800.0;
+const SELF_K: f32 = 60_000.0; // node-node repulsion stiffness
+
+/// Add ground contact forces to any node penetrating the terrain. Uses the
+/// terrain surface normal (gradient) for both push-out and friction.
+pub fn apply_terrain(n: &mut Nodes) {
+    for i in 0..n.len() {
+        if n.inv_mass[i] == 0.0 || n.is_wheel[i] {
+            continue; // pinned, or a wheel hub (handled by the tire model)
+        }
+        let r = n.radius[i];
+        let ground = scene::terrain_height(n.px[i], n.pz[i]);
+        let penetration = (ground + r) - n.py[i];
+        if penetration <= 0.0 {
+            continue;
+        }
+
+        let [nx, ny, nz] = scene::terrain_normal(n.px[i], n.pz[i]);
+
+        // Normal velocity component.
+        let vn = n.vx[i] * nx + n.vy[i] * ny + n.vz[i] * nz;
+
+        // Penalty normal force: spring out of the surface, damped on approach.
+        let mut fn_mag = CONTACT_K * penetration - CONTACT_DAMP * vn;
+        if fn_mag < 0.0 {
+            fn_mag = 0.0; // contacts only push, never pull
+        }
+        n.fx[i] += fn_mag * nx;
+        n.fy[i] += fn_mag * ny;
+        n.fz[i] += fn_mag * nz;
+
+        // Coulomb friction opposing the tangential velocity.
+        let vtx = n.vx[i] - vn * nx;
+        let vty = n.vy[i] - vn * ny;
+        let vtz = n.vz[i] - vn * nz;
+        let vt = (vtx * vtx + vty * vty + vtz * vtz).sqrt();
+        if vt > 1e-4 {
+            let max_friction = FRICTION * fn_mag;
+            // Force opposes motion; capped by the friction cone.
+            let scale = -max_friction / vt;
+            n.fx[i] += vtx * scale;
+            n.fy[i] += vty * scale;
+            n.fz[i] += vtz * scale;
+        }
+    }
+}
+
+/// Penalty collision of every (non-pinned) node against the axis-aligned obstacle
+/// boxes. Uses the classic sphere-vs-AABB closest-point test. This is what makes
+/// crashing into the boxes deform the car.
+pub fn apply_obstacles(n: &mut Nodes, boxes: &[ObstacleBox]) {
+    for i in 0..n.len() {
+        if n.inv_mass[i] == 0.0 {
+            continue;
+        }
+        let (px, py, pz) = (n.px[i], n.py[i], n.pz[i]);
+        let r = n.radius[i];
+        for b in boxes {
+            let (min, max) = (
+                [b.center[0] - b.half[0], b.center[1] - b.half[1], b.center[2] - b.half[2]],
+                [b.center[0] + b.half[0], b.center[1] + b.half[1], b.center[2] + b.half[2]],
+            );
+            // Closest point on the box to the node center.
+            let cx = px.clamp(min[0], max[0]);
+            let cy = py.clamp(min[1], max[1]);
+            let cz = pz.clamp(min[2], max[2]);
+            let (dx, dy, dz) = (px - cx, py - cy, pz - cz);
+            let dist2 = dx * dx + dy * dy + dz * dz;
+
+            let (nx, ny, nz, pen);
+            if dist2 > 1e-12 {
+                // Center outside the box: contact only if the surface is within r.
+                if dist2 >= r * r {
+                    continue;
+                }
+                let dist = dist2.sqrt();
+                nx = dx / dist;
+                ny = dy / dist;
+                nz = dz / dist;
+                pen = r - dist;
+            } else {
+                // Center inside the box: eject along the least-penetration face,
+                // by the full depth to that face PLUS the radius (otherwise a
+                // deeply embedded node only gets a tiny push and stays lodged).
+                let dl = [px - min[0], py - min[1], pz - min[2]];
+                let dh = [max[0] - px, max[1] - py, max[2] - pz];
+                let axes = [
+                    (dl[0], [-1.0, 0.0, 0.0]),
+                    (dh[0], [1.0, 0.0, 0.0]),
+                    (dl[1], [0.0, -1.0, 0.0]),
+                    (dh[1], [0.0, 1.0, 0.0]),
+                    (dl[2], [0.0, 0.0, -1.0]),
+                    (dh[2], [0.0, 0.0, 1.0]),
+                ];
+                let mut best = f32::INFINITY;
+                let mut axis = [0.0, 1.0, 0.0];
+                for (d, a) in axes {
+                    if d < best {
+                        best = d;
+                        axis = a;
+                    }
+                }
+                nx = axis[0];
+                ny = axis[1];
+                nz = axis[2];
+                pen = best + r;
+            }
+
+            let vn = n.vx[i] * nx + n.vy[i] * ny + n.vz[i] * nz;
+            let f = (OBSTACLE_K * pen - OBSTACLE_DAMP * vn).max(0.0);
+            n.fx[i] += f * nx;
+            n.fy[i] += f * ny;
+            n.fz[i] += f * nz;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::softbody::structure::Nodes;
+
+    /// A node spawned deep inside a box must be ejected (not lodged) — regression
+    /// for the "fall onto a block and get stuck" bug.
+    #[test]
+    fn node_inside_box_is_ejected() {
+        let mut n = Nodes::default();
+        n.push([0.0, 1.0, 0.0], 5.0, 0.2); // at the box center
+        let boxes = vec![ObstacleBox {
+            center: [0.0, 1.0, 0.0],
+            half: [1.0, 1.0, 1.0],
+            color: [0.0, 0.0, 0.0],
+        }];
+
+        // Penalty contact + plain Euler, no gravity.
+        let dt = 1.0 / 1000.0;
+        for _ in 0..400 {
+            n.fx[0] = 0.0;
+            n.fy[0] = 0.0;
+            n.fz[0] = 0.0;
+            apply_obstacles(&mut n, &boxes);
+            let im = n.inv_mass[0];
+            n.vx[0] += n.fx[0] * im * dt;
+            n.vy[0] += n.fy[0] * im * dt;
+            n.vz[0] += n.fz[0] * im * dt;
+            n.px[0] += n.vx[0] * dt;
+            n.py[0] += n.vy[0] * dt;
+            n.pz[0] += n.vz[0] * dt;
+        }
+
+        // Outside the box (beyond a face by at least the radius margin).
+        let outside = n.px[0].abs() > 1.0 || n.py[0] > 2.0 || n.py[0] < 0.0 || n.pz[0].abs() > 1.0;
+        assert!(outside, "node should be ejected, ended at ({}, {}, {})", n.px[0], n.py[0], n.pz[0]);
+    }
+}
+
+/// Light brute-force self-collision: repel node pairs that are NOT joined by an
+/// (unbroken) beam and have come closer than the sum of their radii. Keeps a
+/// crumpled structure from passing through itself. O(n^2) — fine for a car-sized
+/// node count. `connected(i,j)` reports an unbroken beam between i and j.
+pub fn apply_self_collision<F: Fn(usize, usize) -> bool>(n: &mut Nodes, connected: F) {
+    let count = n.len();
+    for i in 0..count {
+        if n.inv_mass[i] == 0.0 {
+            continue;
+        }
+        for j in (i + 1)..count {
+            if n.inv_mass[j] == 0.0 || connected(i, j) {
+                continue;
+            }
+            let dx = n.px[j] - n.px[i];
+            let dy = n.py[j] - n.py[i];
+            let dz = n.pz[j] - n.pz[i];
+            let rsum = n.radius[i] + n.radius[j];
+            let dist2 = dx * dx + dy * dy + dz * dz;
+            if dist2 >= rsum * rsum || dist2 < 1e-9 {
+                continue;
+            }
+            let dist = dist2.sqrt();
+            let (ux, uy, uz) = (dx / dist, dy / dist, dz / dist);
+            let pen = rsum - dist;
+            let f = SELF_K * pen;
+            // Push apart (j gets +, i gets −).
+            n.fx[j] += f * ux;
+            n.fy[j] += f * uy;
+            n.fz[j] += f * uz;
+            n.fx[i] -= f * ux;
+            n.fy[i] -= f * uy;
+            n.fz[i] -= f * uz;
+        }
+    }
+}

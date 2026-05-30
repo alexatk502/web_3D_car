@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>WASM 3D Car</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <canvas id="gl"></canvas>
+
+    <!-- Settings panel -->
+    <div id="panel">
+      <h1>3D Car</h1>
+
+      <label class="row">
+        <span>Render scale <em id="scaleVal">1.00x</em></span>
+        <input id="scale" type="range" min="0.25" max="1" step="0.05" />
+      </label>
+
+      <label class="row">
+        <span>FOV <em id="fovVal">70°</em></span>
+        <input id="fov" type="range" min="40" max="110" step="1" />
+      </label>
+
+      <label class="row checkbox">
+        <input id="wire" type="checkbox" />
+        <span>Wireframe</span>
+      </label>
+
+      <label class="row checkbox">
+        <input id="struct" type="checkbox" />
+        <span>Show structure (nodes/beams)</span>
+      </label>
+
+      <label class="row">
+        <span>Renderer (<em id="backendName">…</em>)</span>
+        <select id="backendSel">
+          <option value="auto">Auto</option>
+          <option value="webgpu">Force WebGPU</option>
+          <option value="webgl">Force WebGL2</option>
+        </select>
+      </label>
+
+      <div class="legend">
+        <strong>Controls</strong>
+        <div>W / ↑ — accelerate</div>
+        <div>S / ↓ — brake / reverse</div>
+        <div>A · D / ← · → — steer</div>
+        <div>Space — handbrake</div>
+        <div>R — reset car</div>
+        <div>C — cycle camera</div>
+        <div>drag — orbit (orbit cam)</div>
+      </div>
+    </div>
+
+    <!-- HUD -->
+    <div id="hud">
+      <div><span>FPS</span><b id="hudFps">0</b></div>
+      <div><span>ms</span><b id="hudMs">0</b></div>
+      <div><span>tris</span><b id="hudTris">0</b></div>
+      <div><span>km/h</span><b id="hudSpeed">0</b></div>
+      <div><span>rpm</span><b id="hudRpm">0</b></div>
+      <div><span>gear</span><b id="hudGear">1</b></div>
+      <div><span>cam</span><b id="hudCam">Chase</b></div>
+      <div><span>res</span><b id="hudRes">0×0</b></div>
+    </div>
+
+    <div id="overlay"></div>
+
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>
