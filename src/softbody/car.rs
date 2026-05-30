@@ -614,10 +614,9 @@ mod tests {
     }
 }
 
-/// Pick `count` chassis nodes near a hub but spread apart, so the wheel is
-/// triangulated and can't pivot/wobble about a single cluster. Greedy
-/// farthest-point sampling, seeded by the nearest node, over a local candidate
-/// pool (the nearest `count*3`).
+/// Pick `count` chassis nodes near a hub but spread apart and biased inboard.
+/// The mounts form a triangulated suspension that locates the wheel laterally
+/// (inboard bias prevents wheels popping in/out of the body).
 fn suspension_mounts(nodes: &Nodes, chassis: &[u32], hub_local: [f32; 3], count: usize) -> Vec<u32> {
     let d2 = |i: usize, p: [f32; 3]| {
         let dx = nodes.px[i] - p[0];
@@ -626,11 +625,25 @@ fn suspension_mounts(nodes: &Nodes, chassis: &[u32], hub_local: [f32; 3], count:
         dx * dx + dy * dy + dz * dz
     };
 
-    let mut scored: Vec<(f32, u32)> = chassis.iter().map(|&c| (d2(c as usize, hub_local), c)).collect();
-    scored.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-    let pool: Vec<u32> = scored.iter().take((count * 3).min(scored.len())).map(|&(_, c)| c).collect();
+    // Bias the search target inboard (toward car centre at [0, hub_local[1], 0]).
+    let biased_target = [
+        hub_local[0] * (1.0 - SUSP_INBOARD_X),
+        hub_local[1],
+        hub_local[2] * (1.0 - SUSP_INBOARD_Z),
+    ];
 
-    let mut picked = vec![pool[0]]; // nearest node first
+    let mut scored: Vec<(f32, u32)> = chassis
+        .iter()
+        .map(|&c| (d2(c as usize, biased_target), c))
+        .collect();
+    scored.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    let pool: Vec<u32> = scored
+        .iter()
+        .take((count * 3).min(scored.len()))
+        .map(|&(_, c)| c)
+        .collect();
+
+    let mut picked = vec![pool[0]]; // nearest inboard node first
     while picked.len() < count && picked.len() < pool.len() {
         // Add the pool node that is farthest from everything already picked.
         let mut best = pool[0];
