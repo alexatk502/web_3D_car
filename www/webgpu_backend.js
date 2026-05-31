@@ -2,6 +2,13 @@
 //   init(canvas), uploadMeshes(meshes), setSize(w,h), render(viewProj, models, opts)
 
 const LIGHT_DIR = [0.4, 1.0, 0.3];
+// Beam stress heatmap: green → yellow → orange → red.
+const STRESS_COLORS = [
+  [0.25, 0.80, 0.25],
+  [0.90, 0.85, 0.20],
+  [0.95, 0.55, 0.10],
+  [0.95, 0.15, 0.10],
+];
 
 export class WebGPUBackend {
   constructor() {
@@ -167,7 +174,22 @@ export class WebGPUBackend {
       entries: [{ binding: 0, resource: { buffer: ubo } }],
     });
 
-    this.soft = { vbo, lineBuf, bg, lineCount: lineIndices.length };
+    // One bind group per stress band (identity model + the band's color) so the
+    // beam heatmap draws each band as a colored segment. Reuses `ident` above.
+    const bandBG = STRESS_COLORS.map((col) => {
+      const u = dev.createBuffer({
+        size: 80,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+      });
+      dev.queue.writeBuffer(u, 0, ident);
+      dev.queue.writeBuffer(u, 64, new Float32Array([...col, 1.0]));
+      return dev.createBindGroup({
+        layout: this.objBGL,
+        entries: [{ binding: 0, resource: { buffer: u } }],
+      });
+    });
+
+    this.soft = { vbo, lineBuf, bg, bandBG, lineCount: lineIndices.length };
   }
 
   // Dynamic skinned car body: static triangle topology, per-frame vertices.
@@ -272,10 +294,24 @@ export class WebGPUBackend {
         dev.queue.writeBuffer(this.soft.lineBuf, 0, opts.soft.lineIndices);
         pass.setPipeline(this.wirePipeline);
         pass.setBindGroup(0, this.frameBG);
-        pass.setBindGroup(1, this.soft.bg);
         pass.setVertexBuffer(0, this.soft.vbo);
         pass.setIndexBuffer(this.soft.lineBuf, "uint16");
-        pass.drawIndexed(count);
+        const bands = opts.soft.bands;
+        if (bands) {
+          // Draw each stress band as a colored segment (heatmap).
+          let off = 0;
+          for (let bi = 0; bi < 4; bi++) {
+            const c = bands[bi];
+            if (c > 0) {
+              pass.setBindGroup(1, this.soft.bandBG[bi]);
+              pass.drawIndexed(c, 1, off); // firstIndex in indices
+            }
+            off += c;
+          }
+        } else {
+          pass.setBindGroup(1, this.soft.bg);
+          pass.drawIndexed(count);
+        }
       }
     }
 

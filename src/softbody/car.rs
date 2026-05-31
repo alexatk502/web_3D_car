@@ -448,12 +448,15 @@ impl Car {
                 let vn = v.dot(nrm);
                 let fz = (WHEEL_CONTACT_K * pen - WHEEL_CONTACT_D * vn).max(0.0);
 
+                // Surface grip at the contact patch (tarmac=1, ice/gravel<1).
+                let mu = TIRE_MU * scene::surface_friction(p.x, p.z);
+
                 let denom = v_long.abs() + 1.0; // +1 tames low-speed singularities
                 let kappa = (w.omega * w.radius - v_long) / denom;
                 let alpha = (v_lat / denom).atan();
-                let lo = tire::longitudinal(fz, TIRE_MU, kappa);
-                let la = tire::lateral(fz, TIRE_MU, alpha);
-                let (fxx, fyy) = tire::friction_circle(lo, la, TIRE_MU * fz);
+                let lo = tire::longitudinal(fz, mu, kappa);
+                let la = tire::lateral(fz, mu, alpha);
+                let (fxx, fyy) = tire::friction_circle(lo, la, mu * fz);
                 fx = fxx;
 
                 let force = nrm * fz + heading * fxx + lat * fyy;
@@ -525,6 +528,16 @@ impl Car {
 
     pub fn speed_kmh(&self) -> f32 {
         self.avg_velocity().dot(self.frame().0).abs() * 3.6
+    }
+
+    /// Mean speed (m/s, magnitude) of the whole car — used for impact detection.
+    pub fn avg_speed_ms(&self) -> f32 {
+        self.avg_velocity().length()
+    }
+
+    /// Number of beams currently broken (for crash-audio impact detection).
+    pub fn broken_beam_count(&self) -> usize {
+        self.structure.beams.broken.iter().filter(|&&b| b).count()
     }
 
     pub fn rpm(&self) -> f32 {

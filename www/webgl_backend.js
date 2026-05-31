@@ -4,6 +4,13 @@ import { VERTEX_SRC, FRAGMENT_SRC } from "./shaders.glsl.js";
 
 const LIGHT_DIR = [0.4, 1.0, 0.3];
 const IDENTITY = new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1]);
+// Beam stress heatmap: green → yellow → orange → red.
+const STRESS_COLORS = [
+  [0.25, 0.80, 0.25],
+  [0.90, 0.85, 0.20],
+  [0.95, 0.55, 0.10],
+  [0.95, 0.15, 0.10],
+];
 
 export class WebGLBackend {
   constructor() {
@@ -151,13 +158,27 @@ export class WebGLBackend {
     // nodes; the index buffer holds only unbroken beams.
     if (this.soft && opts && opts.soft && opts.soft.lineCount > 0) {
       gl.uniformMatrix4fv(this.loc.model, false, IDENTITY);
-      gl.uniform3fv(this.loc.color, this.soft.color);
       gl.bindVertexArray(this.soft.vao);
       gl.bindBuffer(gl.ARRAY_BUFFER, this.soft.vbo);
       gl.bufferSubData(gl.ARRAY_BUFFER, 0, opts.soft.interleaved);
       gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.soft.lineBuf);
       gl.bufferSubData(gl.ELEMENT_ARRAY_BUFFER, 0, opts.soft.lineIndices);
-      gl.drawElements(gl.LINES, opts.soft.lineCount, gl.UNSIGNED_SHORT, 0);
+      const bands = opts.soft.bands;
+      if (bands) {
+        // Draw each stress band as a contiguous colored segment (heatmap).
+        let off = 0;
+        for (let bi = 0; bi < 4; bi++) {
+          const c = bands[bi];
+          if (c > 0) {
+            gl.uniform3fv(this.loc.color, STRESS_COLORS[bi]);
+            gl.drawElements(gl.LINES, c, gl.UNSIGNED_SHORT, off * 2); // u16 → byte offset
+          }
+          off += c;
+        }
+      } else {
+        gl.uniform3fv(this.loc.color, this.soft.color);
+        gl.drawElements(gl.LINES, opts.soft.lineCount, gl.UNSIGNED_SHORT, 0);
+      }
     }
     gl.bindVertexArray(null);
   }

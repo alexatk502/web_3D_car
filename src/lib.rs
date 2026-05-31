@@ -54,11 +54,16 @@ pub struct World {
     num_objects: usize, // num_static + wheels (total model matrices in buffer)
     buffer: RenderBuffer,
     node_buf: Vec<f32>, // [x,y,z, ...] per node, refreshed each frame
-    line_buf: Vec<u16>, // active (unbroken) beam endpoint pairs, refreshed each frame
+    line_buf: Vec<u16>, // active (unbroken) beam endpoint pairs, ordered by stress band
     line_count: usize,  // number of valid indices in line_buf this frame
+    line_bands: [usize; 4], // index count per stress band (green→yellow→orange→red)
     input: Input,
     accumulator: f32,
     last_substeps: u32, // substeps run on the most recent frame (HUD)
+    // Impact detection for crash audio: sudden speed drop + newly-broken beams.
+    prev_speed_ms: f32,
+    prev_broken: usize,
+    last_impact: f32,
 }
 
 #[wasm_bindgen]
@@ -96,9 +101,13 @@ impl World {
             node_buf,
             line_buf,
             line_count: 0,
+            line_bands: [0; 4],
             input: Input::default(),
             accumulator: 0.0,
             last_substeps: 0,
+            prev_speed_ms: 0.0,
+            prev_broken: 0,
+            last_impact: 0.0,
         }
     }
 
@@ -202,6 +211,16 @@ impl World {
         }
         self.last_substeps = steps;
 
+        // Impact level for crash audio: a sudden drop in the car's speed (a hit/
+        // landing) plus the number of beams that snapped this frame (the crunch).
+        let now_speed = self.car.avg_speed_ms();
+        let speed_drop = (self.prev_speed_ms - now_speed).max(0.0);
+        self.prev_speed_ms = now_speed;
+        let broken_now = self.car.broken_beam_count();
+        let broke_delta = broken_now.saturating_sub(self.prev_broken);
+        self.prev_broken = broken_now;
+        self.last_impact = broke_delta as f32 * 2.0 + speed_drop;
+
         self.refill_buffer(camera_mode, dt, orbit_dx, orbit_dy);
         self.refill_nodes();
         self.refill_lines();
@@ -247,19 +266,56 @@ impl World {
         }
     }
 
-    /// Fill `line_buf` with the endpoint pairs of unbroken beams only, so broken
-    /// beams vanish from the debug renderer.
+    /// Fill `line_buf` with the endpoint pairs of unbroken beams, ordered by stress
+    /// band (broken beams vanish). Stress = current strain relative to the beam's
+    /// own break threshold (0..1), bucketed into 4 bands so the renderer can draw a
+    /// green→yellow→orange→red heatmap with one colored draw call per band.
     fn refill_lines(&mut self) {
-        let b = &self.car.structure.beams;
-        let mut k = 0;
+        let s = &self.car.structure;
+        let b = &s.beams;
+        let n = &s.nodes;
+        let band_of = |i: usize| -> usize {
+            let (ia, ib) = (b.a[i] as usize, b.b[i] as usize);
+            let dx = n.px[ib] - n.px[ia];
+            let dy = n.py[ib] - n.py[ia];
+            let dz = n.pz[ib] - n.pz[ia];
+            let len = (dx * dx + dy * dy + dz * dz).sqrt();
+            let rest = b.rest[i];
+            if rest < 1e-6 {
+                return 0;
+            }
+            let strain = (len - rest).abs() / rest;
+            let frac = (strain / b.break_strain[i].max(1e-3)).clamp(0.0, 1.0);
+            ((frac * 4.0) as usize).min(3)
+        };
+
+        // Pass 1: count active beams per band.
+        let mut counts = [0usize; 4];
         for i in 0..b.len() {
             if !b.broken[i] {
-                self.line_buf[k] = b.a[i] as u16;
-                self.line_buf[k + 1] = b.b[i] as u16;
-                k += 2;
+                counts[band_of(i)] += 1;
             }
         }
-        self.line_count = k;
+        // Band start cursors (in pairs).
+        let mut cursor = [0usize; 4];
+        let mut acc = 0;
+        for band in 0..4 {
+            cursor[band] = acc;
+            acc += counts[band];
+        }
+        // Pass 2: place each beam's endpoint pair into its band's slot.
+        for i in 0..b.len() {
+            if b.broken[i] {
+                continue;
+            }
+            let band = band_of(i);
+            let k = cursor[band] * 2;
+            self.line_buf[k] = b.a[i] as u16;
+            self.line_buf[k + 1] = b.b[i] as u16;
+            cursor[band] += 1;
+        }
+        self.line_count = acc * 2;
+        self.line_bands = [counts[0] * 2, counts[1] * 2, counts[2] * 2, counts[3] * 2];
     }
 
     // --- Static render buffer (view + model matrices) ---
@@ -306,6 +362,13 @@ impl World {
         self.line_count
     }
 
+    /// Index count per stress band [green, yellow, orange, red]. `line_buf` is
+    /// ordered by band, so the renderer draws each band as a contiguous colored
+    /// segment (a strain heatmap). Sums to `line_count`.
+    pub fn line_band_counts(&self) -> Vec<u32> {
+        self.line_bands.iter().map(|&c| c as u32).collect()
+    }
+
     /// Car forward speed in km/h.
     pub fn speed_kmh(&self) -> f32 {
         self.car.speed_kmh()
@@ -314,6 +377,12 @@ impl World {
     /// Engine RPM (HUD).
     pub fn rpm(&self) -> f32 {
         self.car.rpm()
+    }
+
+    /// Impact intensity this frame (0 ≈ calm; spikes on crashes/landings). Drives
+    /// the crash/thud audio. Unitless: ~speed-drop in m/s plus 2× beams snapped.
+    pub fn impact_level(&self) -> f32 {
+        self.last_impact
     }
 
     /// Current gear: -1 = reverse, 0 = neutral, 1..=6 forward (HUD formats it).

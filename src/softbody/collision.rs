@@ -50,7 +50,7 @@ pub fn apply_terrain(n: &mut Nodes) {
         let vtz = n.vz[i] - vn * nz;
         let vt = (vtx * vtx + vty * vty + vtz * vtz).sqrt();
         if vt > 1e-4 {
-            let max_friction = FRICTION * fn_mag;
+            let max_friction = FRICTION * scene::surface_friction(n.px[i], n.pz[i]) * fn_mag;
             // Force opposes motion; capped by the friction cone.
             let scale = -max_friction / vt;
             n.fx[i] += vtx * scale;

@@ -8,6 +8,7 @@ import { buildMesh } from "./meshes.js";
 import { buildCarBody } from "./carbody.js";
 import { Input } from "./input.js";
 import { UI } from "./ui.js";
+import { Audio } from "./audio.js";
 import { perspective, multiply, deg2rad } from "./math.js";
 
 async function main() {
@@ -99,6 +100,7 @@ async function main() {
   };
 
   const input = new Input(canvas);
+  const audio = new Audio();
 
   // Zero-copy view over the shared buffer. Re-created if WASM memory grows
   // (which detaches the old ArrayBuffer).
@@ -150,6 +152,14 @@ async function main() {
     const orbit = input.takeOrbit();
     world.step(dt, input.cameraMode, orbit.dx, orbit.dy);
 
+    // Audio (opt-in): engine note tracks rpm, bursts on impacts.
+    if (ui.state.sound) {
+      audio.ensure();
+      audio.update(world.rpm(), world.impact_level(), dt);
+    } else {
+      audio.silence();
+    }
+
     // Read view + model matrices (zero-copy). Memory growth detaches buffers.
     if (!bufView || bufView.buffer !== wasm.memory.buffer || bufView.length === 0) {
       refreshView();
@@ -186,6 +196,7 @@ async function main() {
         interleaved: softScratch,
         lineIndices: lineView.subarray(0, lineCount),
         lineCount,
+        bands: world.line_band_counts(), // [green, yellow, orange, red] index counts
       };
     }
     backend.render(viewProj, models, renderOpts);

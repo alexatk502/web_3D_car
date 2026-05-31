@@ -7,13 +7,13 @@ use web_3d_car::World;
 fn world_builds_and_steps() {
     let mut world = World::new();
 
-    // Static scene descriptor: terrain + 10 obstacle boxes = 11 objects.
+    // Static scene descriptor: terrain + 10 obstacle boxes + 2 surface patches.
     let desc = world.descriptor();
     assert!(desc.starts_with('['), "descriptor should be a JSON array");
     assert!(desc.contains("\"terrain\""), "should include rocky terrain");
     assert!(desc.contains("\"box\""), "should include obstacle boxes");
-    // 11 static (terrain + 10 obstacles) + 4 wheels.
-    assert_eq!(world.object_count(), 15);
+    // 13 static (terrain + 10 obstacles + 2 surface patches) + 4 wheels.
+    assert_eq!(world.object_count(), 17);
     assert_eq!(world.wheel_count(), 4);
     assert_eq!(world.buffer_len(), 16 * (world.object_count() + 1));
 

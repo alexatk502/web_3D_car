@@ -10,6 +10,7 @@ export class UI {
       fovDeg: 70,
       wireframe: false,
       showStructure: false,
+      sound: false,
     };
     this._changeCbs = [];
 
@@ -20,6 +21,7 @@ export class UI {
       fovVal: document.getElementById("fovVal"),
       wire: document.getElementById("wire"),
       struct: document.getElementById("struct"),
+      sound: document.getElementById("sound"),
       backendSel: document.getElementById("backendSel"),
       backendName: document.getElementById("backendName"),
       hudFps: document.getElementById("hudFps"),
@@ -43,6 +45,7 @@ export class UI {
     this.el.fov.value = String(this.state.fovDeg);
     this.el.wire.checked = this.state.wireframe;
     this.el.struct.checked = this.state.showStructure;
+    this.el.sound.checked = this.state.sound;
     this.el.backendSel.value = this.forcedBackend() || "auto";
 
     this.el.scale.addEventListener("input", () => {
@@ -59,6 +62,9 @@ export class UI {
     });
     this.el.struct.addEventListener("change", () => {
       this.state.showStructure = this.el.struct.checked;
+    });
+    this.el.sound.addEventListener("change", () => {
+      this.state.sound = this.el.sound.checked;
     });
     // Changing the backend reloads with a ?backend= override.
     this.el.backendSel.addEventListener("change", () => {

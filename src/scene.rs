@@ -77,6 +77,39 @@ pub fn terrain_height(x: f32, z: f32) -> f32 {
     base * smoother(t)
 }
 
+/// A square ground patch with a different grip level (gravel/ice/etc.). Shared by
+/// the renderer (drawn as a thin colored quad) and the tire model (grip lookup).
+pub struct SurfacePatch {
+    pub center: [f32; 2], // x, z
+    pub half: f32,        // half-extent of the square
+    pub grip: f32,        // multiplier on tire/ground friction (1 = tarmac)
+    pub color: [f32; 3],
+}
+
+/// Hand-placed surface zones near the spawn area (so they're easy to find/test).
+pub fn surface_patches() -> Vec<SurfacePatch> {
+    // Placed off the +x spawn/launch line (z away from 0) so they're easy to find
+    // but don't sit under the car at spawn.
+    vec![
+        // Ice: very low grip, pale blue.
+        SurfacePatch { center: [8.0, 10.0], half: 5.0, grip: 0.2, color: [0.62, 0.80, 0.95] },
+        // Gravel: reduced grip, dusty brown.
+        SurfacePatch { center: [-8.0, -10.0], half: 5.0, grip: 0.55, color: [0.50, 0.44, 0.33] },
+    ]
+}
+
+/// Grip multiplier at world (x, z): 1.0 on tarmac, lower on a surface patch. If
+/// patches overlap, the slipperiest wins.
+pub fn surface_friction(x: f32, z: f32) -> f32 {
+    let mut grip: f32 = 1.0;
+    for p in surface_patches() {
+        if (x - p.center[0]).abs() <= p.half && (z - p.center[1]).abs() <= p.half {
+            grip = grip.min(p.grip);
+        }
+    }
+    grip
+}
+
 /// Unit surface normal of the terrain at (x, z), from the analytic gradient.
 /// Used by soft-body node↔terrain collision.
 pub fn terrain_normal(x: f32, z: f32) -> [f32; 3] {
@@ -165,6 +198,25 @@ pub fn descriptor_json(objs: &[ObjDesc]) -> String {
     s
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn surface_friction_zones() {
+        // Tarmac away from any patch.
+        assert!((surface_friction(100.0, 100.0) - 1.0).abs() < 1e-6);
+        // Inside the ice patch → low grip.
+        assert!(surface_friction(8.0, 10.0) < 0.5, "ice should be slippery");
+        // Inside the gravel patch → reduced but more than ice.
+        let g = surface_friction(-8.0, -10.0);
+        assert!(g > 0.3 && g < 1.0, "gravel grip should be mid (got {})", g);
+        // Spawn/launch line stays tarmac.
+        assert!((surface_friction(0.0, 0.0) - 1.0).abs() < 1e-6);
+        assert!((surface_friction(8.0, 0.0) - 1.0).abs() < 1e-6);
+    }
+}
+
 /// Spawn the rocky terrain and a handful of fixed obstacle boxes resting on it.
 /// Returns the fixed-body handles (in render order) and their descriptors.
 pub fn build_static(physics: &mut Physics) -> (Vec<RigidBodyHandle>, Vec<ObjDesc>) {
@@ -217,6 +269,22 @@ pub fn build_static(physics: &mut Physics) -> (Vec<RigidBodyHandle>, Vec<ObjDesc
                 hz: o.half[2],
             },
             color: o.color,
+        });
+    }
+
+    // --- Surface patches: visual-only thin quads (NO collider) marking grip zones.
+    // They get a fixed body purely so they occupy a render model-matrix slot in
+    // lockstep with the descriptors; the soft-body grip lookup uses
+    // `surface_friction` analytically, not these bodies.
+    for p in surface_patches() {
+        let y = terrain_height(p.center[0], p.center[1]) + 0.02;
+        let body = physics
+            .bodies
+            .insert(RigidBodyBuilder::fixed().translation(vector![p.center[0], y, p.center[1]]));
+        handles.push(body);
+        descs.push(ObjDesc {
+            kind: MeshKind::Box { hx: p.half, hy: 0.02, hz: p.half },
+            color: p.color,
         });
     }
 
