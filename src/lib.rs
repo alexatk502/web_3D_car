@@ -127,6 +127,13 @@ impl World {
         self.car.wheel_count()
     }
 
+    /// Enable the parallel (multi-threaded) solver path. Call from JS only after
+    /// `initThreadPool` has resolved, so the page is cross-origin isolated and the
+    /// rayon worker pool exists.
+    pub fn set_threaded(&mut self, on: bool) {
+        self.car.set_threaded(on);
+    }
+
     /// Set the current input. `steer` is -1..1 (positive = left).
     pub fn set_input(&mut self, throttle: f32, brake: f32, steer: f32, handbrake: bool, reset: bool) {
         self.input = Input {

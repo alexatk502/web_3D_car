@@ -14,10 +14,10 @@ use glam::{Mat3, Quat, Vec3};
 use std::collections::HashSet;
 
 // --- Tunables ---
-// Chassis node grid (real crumple zones). 5 x 3 x 3 = 45 nodes.
-const CHASSIS_NX: usize = 5;
-const CHASSIS_NY: usize = 3;
-const CHASSIS_NZ: usize = 3;
+// Chassis node grid (real crumple zones). 6 x 4 x 4 = 96 nodes.
+const CHASSIS_NX: usize = 6;
+const CHASSIS_NY: usize = 4;
+const CHASSIS_NZ: usize = 4;
 const CAGE_MIN: [f32; 3] = [-1.4, 0.2, -0.7]; // body box (length, height, width)
 const CAGE_MAX: [f32; 3] = [1.4, 0.8, 0.7];
 
@@ -27,11 +27,11 @@ const CAGE_MAX: [f32; 3] = [1.4, 0.8, 0.7];
 // rather than ringing. The JS frame loop runs (dt * SUBSTEP_HZ) substeps/frame.
 const SUBSTEP_HZ: f32 = 2000.0;
 
-// Above this node count the O(n^2) self-collision runs on the thread pool; below
-// it the serial path is faster (thread fork/join isn't worth it). The current
-// car is well under this, so it stays single-threaded — threading is there to
-// let us scale node count / substep rate without tanking the frame rate.
-const PAR_SELF_THRESHOLD: usize = 256;
+// Above this node count the O(n^2) self-collision runs on the thread pool (when
+// threading is available); below it the serial path is faster (thread fork/join
+// isn't worth it). Measured break-even on 2 cores is ~80-100 nodes, so the
+// current ~100-node car uses the pool.
+const PAR_SELF_THRESHOLD: usize = 80;
 
 // NOTE on damping: an interior grid node touches ~18 beams, so the *per-node*
 // damping is ~18*CHASSIS_D. Explicit integration is stable only while
@@ -42,8 +42,11 @@ const PAR_SELF_THRESHOLD: usize = 256;
 // to ~0.45 of critical, so a moderate stiffness feels solid AND still crumples.
 const CHASSIS_K: f32 = 650_000.0; // axis-beam stiffness (rigid to drive, still crushable)
 const CHASSIS_DIAG: f32 = 1.6; // diagonal beams = CHASSIS_K * this — the shear/torsion bracing
-const CHASSIS_D: f32 = 1_900.0; // strong damping (stable at 2 kHz, mass 12) — no ringing
-const CHASSIS_NODE_MASS: f32 = 12.0; // ~45*12 = 540 kg chassis
+// Damping is capped by stability (~18*CHASSIS_D*inv_mass*dt < 2). The finer grid
+// uses lighter nodes, which lowers that cap, so CHASSIS_D drops too — but the
+// damping *ratio* (~0.5, what kills the jelly) is preserved.
+const CHASSIS_D: f32 = 1_500.0; // strong damping (stable at 2 kHz, mass 8)
+const CHASSIS_NODE_MASS: f32 = 8.0; // ~96*8 = 768 kg chassis
 const CHASSIS_DEFORM: f32 = 0.05; // stays elastic under driving loads; dents past ~5% strain
 const CHASSIS_BREAK: f32 = 0.40; // severs past 40% strain (hard crashes)
 
@@ -112,6 +115,11 @@ pub struct Car {
     // to avoid per-substep allocation): per-node net force + one buffer per thread.
     self_force: Vec<[f32; 3]>,
     self_bufs: Vec<Vec<[f32; 3]>>,
+    // Whether the rayon thread pool is ready (set by JS once initThreadPool
+    // succeeds). The parallel solver path is only taken when this is true, so a
+    // non-cross-origin-isolated page safely stays serial instead of calling rayon
+    // with no pool.
+    threaded: bool,
     // Controls.
     steer: f32,
     throttle: f32,
@@ -256,12 +264,18 @@ impl Car {
             right,
             self_force: Vec::new(),
             self_bufs: Vec::new(),
+            threaded: false,
             steer: 0.0,
             throttle: 0.0,
             brake: 0.0,
             steer_in: 0.0,
             handbrake: false,
         }
+    }
+
+    /// Enable the parallel solver path (call once the rayon pool is ready).
+    pub fn set_threaded(&mut self, on: bool) {
+        self.threaded = on;
     }
 
     pub fn set_input(&mut self, throttle: f32, brake: f32, steer: f32, handbrake: bool, reset: bool) {
@@ -328,7 +342,7 @@ impl Car {
             let (lo, hi) = (i.min(j), i.max(j));
             connected.contains(&(lo as u32, hi as u32))
         };
-        if count >= PAR_SELF_THRESHOLD {
+        if self.threaded && count >= PAR_SELF_THRESHOLD {
             self.self_force.resize(count, [0.0; 3]);
             collision::self_collision_gather(
                 &self.structure.nodes,

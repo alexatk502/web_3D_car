@@ -33,6 +33,8 @@ async function main() {
   }
 
   const world = new World();
+  // Enable the parallel solver path only when the worker pool actually started.
+  world.set_threaded(threads > 1);
 
   // The descriptor (geometry + colors) is the single source of truth for sizes.
   const descriptor = JSON.parse(world.descriptor);
