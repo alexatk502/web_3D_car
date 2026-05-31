@@ -103,7 +103,6 @@ pub struct Wheel {
     pub contact: bool,
     // Deformable tread ring (node/beam tire shell around the hub).
     pub tread: Vec<u32>,
-    pub tread_angles: Vec<f32>,
     pub pressure: f32,           // inflation 0..1 (0 = blown flat)
     pub tire_beams: (usize, usize), // [start,end) range of this tire's beams
 }
@@ -249,7 +248,7 @@ impl Car {
             }
             // Deformable tread ring around the hub (wheel plane = local XY at build).
             let tb_start = beams.len();
-            let (tread, tread_angles) =
+            let tread =
                 tire_body::build_tire(&mut nodes, &mut beams, hub, hl, [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], WHEEL_RADIUS);
             let tb_end = beams.len();
             wheels.push(Wheel {
@@ -262,7 +261,6 @@ impl Car {
                 inertia: WHEEL_INERTIA,
                 contact: false,
                 tread,
-                tread_angles,
                 pressure: 1.0,
                 tire_beams: (tb_start, tb_end),
             });
@@ -528,22 +526,10 @@ impl Car {
             // Accumulate the visual spin angle.
             w.spin += w.omega * dt;
 
-            // Deformable tread ring: pressure + spin motor + axle-centering + squat.
-            let axle = lat; // wheel spin axis
+            // Deformable tread ring: pressure + axle-centering + ground squat.
+            let axle = lat; // wheel spin axis (ring plane normal)
             let b_plane = axle.cross(heading).normalize_or_zero(); // in-plane "up"
-            tire_body::apply_tire(
-                nodes,
-                &w.tread,
-                &w.tread_angles,
-                w.node as usize,
-                heading,
-                b_plane,
-                axle,
-                w.radius,
-                w.spin,
-                w.pressure,
-                dt,
-            );
+            tire_body::apply_tire(nodes, &w.tread, w.node as usize, heading, b_plane, axle, w.pressure);
             // Blowout: once any of this tire's beams snaps, it deflates.
             if w.pressure > 0.0 {
                 let (bs, be) = w.tire_beams;
@@ -776,6 +762,33 @@ mod tests {
                 assert!(
                     d > 0.5 * WHEEL_RADIUS && d < 1.6 * WHEEL_RADIUS,
                     "tread radius out of range: {} (R={})",
+                    d,
+                    WHEEL_RADIUS
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn tires_stay_bounded_while_driving() {
+        // Regression: physically spinning the tread ring made it spiral outward
+        // (orbit blow-up) under throttle/steer. The ring must stay bounded while
+        // driving + steering.
+        let mut car = Car::new();
+        frames(&mut car, 60); // settle
+        car.set_input(1.0, 0.0, 0.8, false, false, 0.0); // throttle + steer
+        frames(&mut car, 240); // ~4 s of driving
+        let n = &car.structure.nodes;
+        for w in &car.wheels {
+            let h = w.node as usize;
+            let hp = Vec3::new(n.px[h], n.py[h], n.pz[h]);
+            for &t in &w.tread {
+                let ti = t as usize;
+                let p = Vec3::new(n.px[ti], n.py[ti], n.pz[ti]);
+                let d = (p - hp).length();
+                assert!(
+                    d.is_finite() && d < 1.6 * WHEEL_RADIUS,
+                    "tread radius grew while driving: {} (R={})",
                     d,
                     WHEEL_RADIUS
                 );

@@ -24,9 +24,7 @@ const RING_D: f32 = 600.0;
 const TIRE_DEFORM: f32 = 0.18; // flexes a lot before taking a set
 const TIRE_BREAK: f32 = 0.55; // ring/spoke severs past this strain → blowout
 
-const PRESSURE: f32 = 2_000.0; // radial outward force per tread node when inflated
-const MOTOR_K: f32 = 5_000.0; // angular spring driving the ring to spin with omega
-const MOTOR_D: f32 = 80.0; // tangential velocity damping
+const PRESSURE: f32 = 700.0; // radial outward force per tread node when inflated
 const AXLE_K: f32 = 9_000.0; // keeps the ring planar (resists sideways splay)
 
 const TREAD_CONTACT_K: f32 = 34_000.0; // squat stiffness vs ground
@@ -44,18 +42,16 @@ pub fn build_tire(
     a: [f32; 3],
     b: [f32; 3],
     r: f32,
-) -> (Vec<u32>, Vec<f32>) {
+) -> Vec<u32> {
     let c = Vec3::from_array(center);
     let (av, bv) = (Vec3::from_array(a), Vec3::from_array(b));
     let mut ids = Vec::with_capacity(TREAD_N);
-    let mut angles = Vec::with_capacity(TREAD_N);
     for i in 0..TREAD_N {
         let theta = (i as f32) * std::f32::consts::TAU / TREAD_N as f32;
         let p = c + (av * theta.cos() + bv * theta.sin()) * r;
         let id = nodes.push(p.to_array(), TREAD_MASS, TREAD_RADIUS);
         nodes.mark_tire(id);
         ids.push(id);
-        angles.push(theta);
     }
     // Spokes: hub → each tread node.
     for &t in &ids {
@@ -67,7 +63,7 @@ pub fn build_tire(
         let t1 = ids[(i + 1) % TREAD_N];
         push_beam(nodes, beams, t0, t1, RING_K, RING_D);
     }
-    (ids, angles)
+    ids
 }
 
 fn push_beam(nodes: &Nodes, beams: &mut Beams, a: u32, b: u32, k: f32, d: f32) {
@@ -79,54 +75,33 @@ fn push_beam(nodes: &Nodes, beams: &mut Beams, a: u32, b: u32, k: f32, d: f32) {
     beams.push(a, b, rest, k, d, TIRE_DEFORM, TIRE_BREAK, BeamKind::Tire);
 }
 
-/// Per-substep tire forces on one wheel's tread ring: inflation pressure, the
-/// spin motor (tracks `spin`), an axle-centering spring (keeps the ring planar),
-/// and ground squat contact. The hub frame is `(a, b)` (wheel plane) + `axle`
-/// (spin axis). `pressure` is 0..1 (0 = blown flat). Spoke/ring beam forces come
-/// from the generic solver; this only adds the tire-specific extras.
-#[allow(clippy::too_many_arguments)]
-pub fn apply_tire(
-    nodes: &mut Nodes,
-    tread: &[u32],
-    angles: &[f32],
-    hub: usize,
-    a: Vec3,
-    b: Vec3,
-    axle: Vec3,
-    r: f32,
-    spin: f32,
-    pressure: f32,
-    dt: f32,
-) {
+/// Per-substep tire forces on one wheel's tread ring: inflation pressure, an
+/// axle-centering spring (keeps the ring planar), and ground squat contact. The
+/// hub frame is `(a, b)` (wheel plane) + `axle` (spin axis). `pressure` is 0..1
+/// (0 = blown flat). Spoke/ring beam forces come from the generic solver; this
+/// adds only the tire-specific extras.
+///
+/// NOTE: the ring is deliberately NOT spun physically. A mass on a spring
+/// orbiting in a circle gains radius every step under explicit integration (an
+/// orbit blow-up), so a tangential spin motor made the tires grow without bound
+/// while driving. The ring only deforms radially here; the rolling rotation is
+/// invisible on a plain tire and the hub still carries `omega` for the physics.
+pub fn apply_tire(nodes: &mut Nodes, tread: &[u32], hub: usize, a: Vec3, b: Vec3, axle: Vec3, pressure: f32) {
     let hub_p = Vec3::new(nodes.px[hub], nodes.py[hub], nodes.pz[hub]);
-    let _ = dt;
-    for (k, &t) in tread.iter().enumerate() {
+    for &t in tread {
         let i = t as usize;
         let p = Vec3::new(nodes.px[i], nodes.py[i], nodes.pz[i]);
         let v = Vec3::new(nodes.vx[i], nodes.vy[i], nodes.vz[i]);
         let rel = p - hub_p;
 
-        // In-plane (wheel-plane) decomposition.
+        // In-plane radial direction (wheel plane spanned by a, b).
         let ca = rel.dot(a);
         let cb = rel.dot(b);
         let radius_ip = (ca * ca + cb * cb).sqrt().max(1e-4);
-        let outward = (a * ca + b * cb) / radius_ip; // unit radial (in-plane)
-        let tang = (a * (-cb) + b * ca) / radius_ip; // unit tangential (CCW)
-
-        let mut f = Vec3::ZERO;
+        let outward = (a * ca + b * cb) / radius_ip;
 
         // Inflation pressure: push the tread radially outward (shape + springiness).
-        f += outward * (PRESSURE * pressure);
-
-        // Spin motor: drive the node toward its target angle (rest_angle + spin),
-        // damped on tangential velocity. Leaves the radial direction free (squat).
-        let target = angles[k] + spin;
-        let current = cb.atan2(ca);
-        let mut err = target - current;
-        // Wrap to (-π, π].
-        err = err - std::f32::consts::TAU * (err / std::f32::consts::TAU).round();
-        let tang_vel = v.dot(tang);
-        f += tang * (MOTOR_K * err * radius_ip - MOTOR_D * tang_vel);
+        let mut f = outward * (PRESSURE * pressure);
 
         // Axle-centering: keep the ring in its plane (resist sideways splay).
         let axle_comp = rel.dot(axle);
@@ -142,7 +117,6 @@ pub fn apply_tire(
             let fz = (TREAD_CONTACT_K * pen - TREAD_CONTACT_D * vn).max(0.0);
             f += nrm * fz;
         }
-        let _ = r;
 
         nodes.fx[i] += f.x;
         nodes.fy[i] += f.y;
