@@ -24,7 +24,7 @@ impl Default for SolverParams {
             gravity: -20.0,
             substep_dt: 1.0 / 1000.0, // 1 kHz in Phase 0 (single-thread); raised later
             global_damping: 0.25, // ~light air drag; lets the body wobble
-            plastic_rate: 0.4,
+            plastic_rate: 0.6, // fraction of beyond-yield strain that sets permanently per substep
         }
     }
 }

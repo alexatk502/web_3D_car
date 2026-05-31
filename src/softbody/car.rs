@@ -47,8 +47,8 @@ const CHASSIS_DIAG: f32 = 1.6; // diagonal beams = CHASSIS_K * this — the shea
 // damping *ratio* (~0.5, what kills the jelly) is preserved.
 const CHASSIS_D: f32 = 1_500.0; // strong damping (stable at 2 kHz, mass 8)
 const CHASSIS_NODE_MASS: f32 = 8.0; // ~96*8 = 768 kg chassis
-const CHASSIS_DEFORM: f32 = 0.05; // stays elastic under driving loads; dents past ~5% strain
-const CHASSIS_BREAK: f32 = 0.40; // severs past 40% strain (hard crashes)
+const CHASSIS_DEFORM: f32 = 0.025; // dents past ~2.5% strain (crumples easily, still elastic when driving)
+const CHASSIS_BREAK: f32 = 0.30; // severs past 30% strain (hard crashes)
 
 // A long-range skeleton tying the 8 cage corners together. Adjacent-cell beams
 // alone leave the cage free to shear/twist globally (a big part of the "jelly"
@@ -56,8 +56,8 @@ const CHASSIS_BREAK: f32 = 0.40; // severs past 40% strain (hard crashes)
 // so a hard crash still collapses the skeleton and lets the body crumple.
 const BRACE_K: f32 = 1_000_000.0;
 const BRACE_D: f32 = 1_800.0;
-const BRACE_DEFORM: f32 = 0.04;
-const BRACE_BREAK: f32 = 0.12;
+const BRACE_DEFORM: f32 = 0.02; // skeleton yields/collapses readily in a crash
+const BRACE_BREAK: f32 = 0.09;
 
 // Each wheel hub mounts to SUSP_MOUNTS spread-out chassis nodes (triangulated so
 // the wheel can't pivot/wobble about a single cluster). The mounts are biased
