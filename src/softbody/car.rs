@@ -64,6 +64,10 @@ const BRACE_BREAK: f32 = 0.12;
 // *inboard* (toward the car centre) so the suspension beams angle inward and
 // locate the wheel laterally — stops it popping in/out of the body.
 const SUSP_MOUNTS: usize = 5;
+// Mounts are chosen from chassis nodes within this radius of the hub (a physical,
+// grid-density-independent base), then spread out — so a finer node grid doesn't
+// shrink the base and let the wheel swing in/out.
+const SUSP_RADIUS: f32 = 1.05;
 const SUSP_INBOARD_X: f32 = 0.55; // 0=at centre, 1=under the wheel (lengthwise)
 const SUSP_INBOARD_Z: f32 = 0.20; // 0=at centreline, 1=under the wheel (sideways)
 const SUSP_K: f32 = 140_000.0; // firm suspension (locates the wheel hard)
@@ -711,9 +715,11 @@ mod tests {
     }
 }
 
-/// Pick `count` chassis nodes near a hub but spread apart and biased inboard.
-/// The mounts form a triangulated suspension that locates the wheel laterally
-/// (inboard bias prevents wheels popping in/out of the body).
+/// Pick `count` chassis nodes to mount a wheel hub to. Candidates are all chassis
+/// nodes within `SUSP_RADIUS` of the hub (a wide, grid-density-independent base);
+/// the mounts are then spread across that region (farthest-point sampling) and
+/// seeded inboard. A wide, spread, inboard-biased base locates the wheel firmly
+/// and stops it popping in/out of the body — independent of how fine the grid is.
 fn suspension_mounts(nodes: &Nodes, chassis: &[u32], hub_local: [f32; 3], count: usize) -> Vec<u32> {
     let d2 = |i: usize, p: [f32; 3]| {
         let dx = nodes.px[i] - p[0];
@@ -722,25 +728,38 @@ fn suspension_mounts(nodes: &Nodes, chassis: &[u32], hub_local: [f32; 3], count:
         dx * dx + dy * dy + dz * dz
     };
 
-    // Bias the search target inboard (toward car centre at [0, hub_local[1], 0]).
+    // Bias the seed inboard (toward car centre at [0, hub_local[1], 0]).
     let biased_target = [
         hub_local[0] * (1.0 - SUSP_INBOARD_X),
         hub_local[1],
         hub_local[2] * (1.0 - SUSP_INBOARD_Z),
     ];
 
-    let mut scored: Vec<(f32, u32)> = chassis
+    // Candidate pool: nodes within a physical radius of the hub. Falls back to the
+    // nearest `count*3` if too few are in range (keeps small grids working).
+    let r2 = SUSP_RADIUS * SUSP_RADIUS;
+    let mut pool: Vec<u32> = chassis
         .iter()
-        .map(|&c| (d2(c as usize, biased_target), c))
+        .cloned()
+        .filter(|&c| d2(c as usize, hub_local) < r2)
         .collect();
-    scored.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-    let pool: Vec<u32> = scored
-        .iter()
-        .take((count * 3).min(scored.len()))
-        .map(|&(_, c)| c)
-        .collect();
+    if pool.len() < count {
+        let mut scored: Vec<(f32, u32)> =
+            chassis.iter().map(|&c| (d2(c as usize, hub_local), c)).collect();
+        scored.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        pool = scored.iter().take((count * 3).min(scored.len())).map(|&(_, c)| c).collect();
+    }
 
-    let mut picked = vec![pool[0]]; // nearest inboard node first
+    // Seed with the most-inboard node, then spread.
+    let seed = *pool
+        .iter()
+        .min_by(|&&a, &&b| {
+            d2(a as usize, biased_target)
+                .partial_cmp(&d2(b as usize, biased_target))
+                .unwrap()
+        })
+        .unwrap();
+    let mut picked = vec![seed];
     while picked.len() < count && picked.len() < pool.len() {
         // Add the pool node that is farthest from everything already picked.
         let mut best = pool[0];
