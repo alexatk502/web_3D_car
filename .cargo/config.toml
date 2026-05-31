@@ -1,0 +1,10 @@
+# WASM threading + SIMD build flags. Scoped to the wasm32 target so native
+# `cargo test` builds (host target) are unaffected.
+#   atomics + bulk-memory + mutable-globals  -> shared memory for threads
+#   simd128                                  -> 128-bit SIMD (autovectorization)
+# `build-std` (needed to recompile std with these features) is passed on the
+# build command line in build.sh, NOT here, so it doesn't apply to native builds.
+[target.wasm32-unknown-unknown]
+rustflags = [
+  "-C", "target-feature=+atomics,+bulk-memory,+mutable-globals,+simd128",
+]

@@ -74,6 +74,42 @@ function carHull(min, max) {
   return mergeBoxes([body, cabin]);
 }
 
+// --- small vector helpers ---
+const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+const cross = (a, b) => [
+  a[1] * b[2] - a[2] * b[1],
+  a[2] * b[0] - a[0] * b[2],
+  a[0] * b[1] - a[1] * b[0],
+];
+const norm = (a) => {
+  const l = Math.hypot(a[0], a[1], a[2]) || 1;
+  return [a[0] / l, a[1] / l, a[2] / l];
+};
+
+function centroidOf(pos, group) {
+  let x = 0, y = 0, z = 0;
+  for (const i of group) {
+    x += pos[i * 3];
+    y += pos[i * 3 + 1];
+    z += pos[i * 3 + 2];
+  }
+  const n = group.length || 1;
+  return [x / n, y / n, z / n];
+}
+
+// Orthonormal car frame [forward, right, up] from node groups — matches the
+// physics-side frame() in car.rs. Used to express the skinning offsets in a
+// frame that rotates with the car, so the body doesn't shear when it turns.
+function chassisFrame(pos, g) {
+  const fc = centroidOf(pos, g.front), rc = centroidOf(pos, g.rear);
+  const rightc = centroidOf(pos, g.right), leftc = centroidOf(pos, g.left);
+  const fwd = norm(sub(fc, rc));
+  const up = norm(cross(sub(rightc, leftc), fwd));
+  const right = norm(cross(fwd, up));
+  return [fwd, right, up];
+}
+
 // Build the skinnable car body. `carDesc.chassisRest` is the flat [x,y,z,...] of
 // the chassis nodes' world rest positions; `chassisCount` is how many.
 export function buildCarBody(carDesc) {
@@ -97,7 +133,27 @@ export function buildCarBody(carDesc) {
   const lcx = (min[0] + max[0]) / 2, lcy = (min[1] + max[1]) / 2, lcz = (min[2] + max[2]) / 2;
   const base = [rcx - lcx, rcy - lcy, rcz - lcz]; // local -> world translation
 
-  // For each vertex: K nearest chassis nodes, inverse-square weights, rest offset.
+  // Identify the extreme-face node groups (front=+x, rear=-x, right=+z, left=-z),
+  // the same groups the physics uses to define the car's frame. The skinning
+  // offsets are stored in this frame so they rotate with the car (no shear when
+  // turning) while local node motion still crumples the panels.
+  let xmin = Infinity, xmax = -Infinity, zmin = Infinity, zmax = -Infinity;
+  for (let c = 0; c < nNodes; c++) {
+    xmin = Math.min(xmin, rest[c * 3]); xmax = Math.max(xmax, rest[c * 3]);
+    zmin = Math.min(zmin, rest[c * 3 + 2]); zmax = Math.max(zmax, rest[c * 3 + 2]);
+  }
+  const ex = (xmax - xmin) * 0.01 + 1e-4, ez = (zmax - zmin) * 0.01 + 1e-4;
+  const groups = { front: [], rear: [], left: [], right: [] };
+  for (let c = 0; c < nNodes; c++) {
+    if (rest[c * 3] >= xmax - ex) groups.front.push(c);
+    if (rest[c * 3] <= xmin + ex) groups.rear.push(c);
+    if (rest[c * 3 + 2] >= zmax - ez) groups.right.push(c);
+    if (rest[c * 3 + 2] <= zmin + ez) groups.left.push(c);
+  }
+  const restBasis = chassisFrame(rest, groups); // [fwd, right, up] at rest
+
+  // For each vertex: K nearest chassis nodes, inverse-square weights, and a
+  // local-frame offset (stored in restBasis coords).
   const indices = new Uint16Array(vCount * K);
   const weights = new Float32Array(vCount * K);
   const offset = new Float32Array(vCount * 3);
@@ -133,10 +189,12 @@ export function buildCarBody(carDesc) {
       py += w * rest[idx * 3 + 1];
       pz += w * rest[idx * 3 + 2];
     }
-    // Offset preserves the exact rest shape (vertex = predicted + offset).
-    offset[v * 3] = wx - px;
-    offset[v * 3 + 1] = wy - py;
-    offset[v * 3 + 2] = wz - pz;
+    // World offset preserves the exact rest shape, then projected into the car's
+    // rest frame so it can be rotated back with the live frame during skinning.
+    const ow = [wx - px, wy - py, wz - pz];
+    offset[v * 3] = dot(ow, restBasis[0]);
+    offset[v * 3 + 1] = dot(ow, restBasis[1]);
+    offset[v * 3 + 2] = dot(ow, restBasis[2]);
   }
 
   const triIndices = new Uint16Array(tris.length * 3);
@@ -150,6 +208,9 @@ export function buildCarBody(carDesc) {
 
   // Rebuild world vertices from current chassis node positions (flat [x,y,z,...]).
   function skin(chassisPos) {
+    // Live car frame, so the baked offsets rotate with the car instead of
+    // shearing the mesh when it turns.
+    const [fwd, right, up] = chassisFrame(chassisPos, groups);
     for (let v = 0; v < vCount; v++) {
       let x = 0, y = 0, z = 0;
       for (let k = 0; k < K; k++) {
@@ -159,10 +220,12 @@ export function buildCarBody(carDesc) {
         y += w * chassisPos[idx * 3 + 1];
         z += w * chassisPos[idx * 3 + 2];
       }
+      // Rotate the local-frame offset into world space: ol.x*fwd + ol.y*right + ol.z*up.
+      const ox = offset[v * 3], oy = offset[v * 3 + 1], oz = offset[v * 3 + 2];
       const o = v * 6;
-      interleaved[o] = x + offset[v * 3];
-      interleaved[o + 1] = y + offset[v * 3 + 1];
-      interleaved[o + 2] = z + offset[v * 3 + 2];
+      interleaved[o] = x + ox * fwd[0] + oy * right[0] + oz * up[0];
+      interleaved[o + 1] = y + ox * fwd[1] + oy * right[1] + oz * up[1];
+      interleaved[o + 2] = z + ox * fwd[2] + oy * right[2] + oz * up[2];
       interleaved[o + 3] = 0;
       interleaved[o + 4] = 0;
       interleaved[o + 5] = 0;

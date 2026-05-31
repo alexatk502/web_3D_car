@@ -1,0 +1,6 @@
+# Threaded WASM (atomics + build-std) requires nightly. rust-src lets cargo
+# recompile std with the threading target features.
+[toolchain]
+channel = "nightly"
+components = ["rust-src"]
+targets = ["wasm32-unknown-unknown"]

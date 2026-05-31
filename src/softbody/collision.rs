@@ -4,6 +4,7 @@
 
 use crate::scene::{self, ObstacleBox};
 use crate::softbody::structure::Nodes;
+use rayon::prelude::*;
 
 // Penalty-contact tuning.
 const CONTACT_K: f32 = 120_000.0; // ground stiffness (N/m of penetration)
@@ -165,6 +166,150 @@ mod tests {
         // Outside the box (beyond a face by at least the radius margin).
         let outside = n.px[0].abs() > 1.0 || n.py[0] > 2.0 || n.py[0] < 0.0 || n.pz[0].abs() > 1.0;
         assert!(outside, "node should be ejected, ended at ({}, {}, {})", n.px[0], n.py[0], n.pz[0]);
+    }
+
+    // A tight grid of overlapping nodes (none beam-connected). The parallel
+    // gather must produce the same net per-node force as the serial scatter.
+    fn overlapping_grid(d: usize) -> Nodes {
+        let mut n = Nodes::default();
+        for x in 0..d {
+            for y in 0..d {
+                for z in 0..d {
+                    // Spacing 0.3 < radius-sum 0.4 -> neighbours overlap.
+                    n.push([x as f32 * 0.3, y as f32 * 0.3, z as f32 * 0.3], 1.0, 0.2);
+                }
+            }
+        }
+        n
+    }
+
+    #[test]
+    fn parallel_self_collision_matches_serial() {
+        let mut n = overlapping_grid(5); // 125 nodes
+        let never = |_: usize, _: usize| false;
+
+        // Serial scatter into the force accumulators.
+        for i in 0..n.len() {
+            n.fx[i] = 0.0; n.fy[i] = 0.0; n.fz[i] = 0.0;
+        }
+        apply_self_collision(&mut n, never);
+        let serial: Vec<[f32; 3]> = (0..n.len()).map(|i| [n.fx[i], n.fy[i], n.fz[i]]).collect();
+
+        // Parallel gather.
+        let mut par = vec![[0.0f32; 3]; n.len()];
+        let mut bufs = Vec::new();
+        self_collision_gather(&n, never, &mut bufs, &mut par);
+
+        for i in 0..n.len() {
+            for c in 0..3 {
+                let diff = (serial[i][c] - par[i][c]).abs();
+                assert!(
+                    diff < 1e-2,
+                    "node {} comp {}: serial {} vs parallel {}",
+                    i, c, serial[i][c], par[i][c]
+                );
+            }
+        }
+    }
+
+    // Scaling check — run explicitly:
+    //   cargo test --release bench_self_collision -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn bench_self_collision_scaling() {
+        use std::time::Instant;
+        let mut n = overlapping_grid(12); // 1728 nodes
+        let never = |_: usize, _: usize| false;
+        let iters = 40;
+
+        let t0 = Instant::now();
+        for _ in 0..iters {
+            for i in 0..n.len() {
+                n.fx[i] = 0.0; n.fy[i] = 0.0; n.fz[i] = 0.0;
+            }
+            apply_self_collision(&mut n, never);
+        }
+        let serial = t0.elapsed();
+
+        let mut out = vec![[0.0f32; 3]; n.len()];
+        let mut bufs = Vec::new();
+        let t1 = Instant::now();
+        for _ in 0..iters {
+            self_collision_gather(&n, never, &mut bufs, &mut out);
+        }
+        let parallel = t1.elapsed();
+
+        println!(
+            "self-collision {} nodes x{} iters: serial {:?}, parallel {:?}, speedup {:.2}x ({} threads)",
+            n.len(), iters, serial, parallel,
+            serial.as_secs_f64() / parallel.as_secs_f64(),
+            rayon::current_num_threads()
+        );
+    }
+}
+
+/// Parallel, race-free self-collision returning the net force per node in `out`.
+/// Spawns exactly `num_threads` tasks, each handling a *strided* subset of the
+/// outer index `i` (t, t+T, t+2T, …). Striding balances the triangular workload
+/// (low and high `i` interleaved) and means just T tasks with no work-stealing
+/// churn. Each task accumulates the symmetric pair forces (both endpoints, j>i)
+/// into its own buffer in `bufs` (reused across substeps — no per-call alloc),
+/// and the T buffers are summed into `out`. Total pair work is n^2/2, same as
+/// the serial scatter. `connected(i,j)` must be order-independent and `Sync`.
+pub fn self_collision_gather<F>(
+    n: &Nodes,
+    connected: F,
+    bufs: &mut Vec<Vec<[f32; 3]>>,
+    out: &mut [[f32; 3]],
+) where
+    F: Fn(usize, usize) -> bool + Sync,
+{
+    let count = n.len();
+    let nt = rayon::current_num_threads().max(1);
+    bufs.resize_with(nt, Vec::new);
+    for b in bufs.iter_mut() {
+        b.clear();
+        b.resize(count, [0.0; 3]);
+    }
+
+    bufs.par_iter_mut().enumerate().for_each(|(t, buf)| {
+        let mut i = t;
+        while i < count {
+            if n.inv_mass[i] != 0.0 {
+                let (pxi, pyi, pzi, ri) = (n.px[i], n.py[i], n.pz[i], n.radius[i]);
+                for j in (i + 1)..count {
+                    if n.inv_mass[j] == 0.0 || connected(i, j) {
+                        continue;
+                    }
+                    let dx = n.px[j] - pxi;
+                    let dy = n.py[j] - pyi;
+                    let dz = n.pz[j] - pzi;
+                    let rsum = ri + n.radius[j];
+                    let dist2 = dx * dx + dy * dy + dz * dz;
+                    if dist2 >= rsum * rsum || dist2 < 1e-9 {
+                        continue;
+                    }
+                    let dist = dist2.sqrt();
+                    let f = SELF_K * (rsum - dist) / dist;
+                    let (fx, fy, fz) = (f * dx, f * dy, f * dz);
+                    // Push apart: j gets +, i gets − (same convention as serial).
+                    buf[j][0] += fx; buf[j][1] += fy; buf[j][2] += fz;
+                    buf[i][0] -= fx; buf[i][1] -= fy; buf[i][2] -= fz;
+                }
+            }
+            i += nt;
+        }
+    });
+
+    for f in out.iter_mut() {
+        *f = [0.0; 3];
+    }
+    for buf in bufs.iter() {
+        for k in 0..count {
+            out[k][0] += buf[k][0];
+            out[k][1] += buf[k][1];
+            out[k][2] += buf[k][2];
+        }
     }
 }
 

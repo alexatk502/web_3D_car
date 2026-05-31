@@ -30,6 +30,10 @@ export class UI {
       hudGear: document.getElementById("hudGear"),
       hudCam: document.getElementById("hudCam"),
       hudRes: document.getElementById("hudRes"),
+      hudThreads: document.getElementById("hudThreads"),
+      hudNodes: document.getElementById("hudNodes"),
+      hudBeams: document.getElementById("hudBeams"),
+      hudSub: document.getElementById("hudSub"),
     };
 
     // Initialize controls from defaults.
@@ -81,7 +85,7 @@ export class UI {
     this.el.backendName.textContent = name;
   }
 
-  updateHUD({ fps, ms, tris, speed, rpm, gear, cam, resW, resH }) {
+  updateHUD({ fps, ms, tris, speed, rpm, gear, cam, resW, resH, threads, nodes, beams, substeps }) {
     this.el.hudFps.textContent = fps.toFixed(0);
     this.el.hudMs.textContent = ms.toFixed(1);
     this.el.hudTris.textContent = tris.toLocaleString();
@@ -90,5 +94,9 @@ export class UI {
     this.el.hudGear.textContent = gear;
     this.el.hudCam.textContent = CAM_NAMES[cam] || "?";
     this.el.hudRes.textContent = resW + "×" + resH;
+    if (threads !== undefined) this.el.hudThreads.textContent = threads;
+    if (nodes !== undefined) this.el.hudNodes.textContent = nodes;
+    if (beams !== undefined) this.el.hudBeams.textContent = beams;
+    if (substeps !== undefined) this.el.hudSub.textContent = substeps;
   }
 }

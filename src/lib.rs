@@ -21,6 +21,12 @@ use scene::descriptor_json;
 use softbody::car::Car;
 use wasm_bindgen::prelude::*;
 
+// Browser thread-pool initializer (Web Workers + SharedArrayBuffer). JS must
+// `await initThreadPool(navigator.hardwareConcurrency)` once before stepping so
+// the parallel solver has workers. wasm-only; native uses rayon's OS pool.
+#[cfg(target_arch = "wasm32")]
+pub use wasm_bindgen_rayon::init_thread_pool;
+
 /// Driver/dev input. (Driving is wired up in Phase 1; Phase 0 only uses `reset`.)
 #[derive(Clone, Copy, Default)]
 struct Input {
@@ -51,6 +57,7 @@ pub struct World {
     line_count: usize,  // number of valid indices in line_buf this frame
     input: Input,
     accumulator: f32,
+    last_substeps: u32, // substeps run on the most recent frame (HUD)
 }
 
 #[wasm_bindgen]
@@ -90,6 +97,7 @@ impl World {
             line_count: 0,
             input: Input::default(),
             accumulator: 0.0,
+            last_substeps: 0,
         }
     }
 
@@ -154,6 +162,7 @@ impl World {
         if self.accumulator > substep_dt {
             self.accumulator = 0.0;
         }
+        self.last_substeps = steps;
 
         self.refill_buffer(camera_mode, dt, orbit_dx, orbit_dy);
         self.refill_nodes();
@@ -235,6 +244,16 @@ impl World {
     }
     pub fn node_count(&self) -> usize {
         self.car.node_count()
+    }
+
+    /// Total beam count (including broken), for the HUD.
+    pub fn beam_count(&self) -> usize {
+        self.car.structure.beams.len()
+    }
+
+    /// Substeps executed on the most recent frame (HUD).
+    pub fn substeps_last_frame(&self) -> u32 {
+        self.last_substeps
     }
 
     // --- Active (unbroken) beam line indices (for the debug renderer) ---

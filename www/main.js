@@ -2,7 +2,7 @@
 // input, and the per-frame data hand-off (zero-copy Float32Array over WASM
 // linear memory).
 
-import init, { World } from "./pkg/web_3d_car.js";
+import init, { World, initThreadPool } from "./pkg/web_3d_car.js";
 import { createRenderer } from "./renderer.js";
 import { buildMesh } from "./meshes.js";
 import { buildCarBody } from "./carbody.js";
@@ -12,6 +12,26 @@ import { perspective, multiply, deg2rad } from "./math.js";
 
 async function main() {
   const wasm = await init(); // InitOutput; exposes `.memory`
+
+  // Spin up the WASM thread pool (Web Workers + SharedArrayBuffer) for the
+  // parallel solver. Requires cross-origin isolation (serve.py sets COOP/COEP);
+  // if that's missing the pool can't start, so we fall back to single-threaded.
+  let threads = 1;
+  if (self.crossOriginIsolated) {
+    threads = Math.max(1, navigator.hardwareConcurrency || 1);
+    try {
+      await initThreadPool(threads);
+      console.log(`[threads] pool started with ${threads} workers`);
+    } catch (e) {
+      threads = 1;
+      console.warn("[threads] pool init failed, running single-threaded:", e);
+    }
+  } else {
+    console.warn(
+      "[threads] not cross-origin isolated (use ./serve.py) — single-threaded"
+    );
+  }
+
   const world = new World();
 
   // The descriptor (geometry + colors) is the single source of truth for sizes.
@@ -181,6 +201,10 @@ async function main() {
         cam: input.cameraMode,
         resW: canvas.width,
         resH: canvas.height,
+        threads,
+        nodes: world.node_count(),
+        beams: world.beam_count(),
+        substeps: world.substeps_last_frame(),
       });
     }
     requestAnimationFrame(frame);

@@ -21,25 +21,51 @@ const CHASSIS_NZ: usize = 3;
 const CAGE_MIN: [f32; 3] = [-1.4, 0.2, -0.7]; // body box (length, height, width)
 const CAGE_MAX: [f32; 3] = [1.4, 0.8, 0.7];
 
+// Physics substep rate. Higher = stiffer & better-damped beams stay stable
+// (the explicit-integration stability limits on BOTH stiffness and damping scale
+// with 1/dt). 2 kHz is what finally lets the chassis be rigid *and* settled
+// rather than ringing. The JS frame loop runs (dt * SUBSTEP_HZ) substeps/frame.
+const SUBSTEP_HZ: f32 = 2000.0;
+
+// Above this node count the O(n^2) self-collision runs on the thread pool; below
+// it the serial path is faster (thread fork/join isn't worth it). The current
+// car is well under this, so it stays single-threaded — threading is there to
+// let us scale node count / substep rate without tanking the frame rate.
+const PAR_SELF_THRESHOLD: usize = 256;
+
 // NOTE on damping: an interior grid node touches ~18 beams, so the *per-node*
 // damping is ~18*CHASSIS_D. Explicit integration is stable only while
-// 18*CHASSIS_D*inv_mass*dt < ~2, so heavier nodes are what let us damp harder.
-const CHASSIS_K: f32 = 650_000.0; // structural stiffness (rigid to drive; ~5x original)
-const CHASSIS_D: f32 = 600.0; // within the per-node stability budget at this mass
-const CHASSIS_NODE_MASS: f32 = 12.0; // ~45*12 = 540 kg chassis (heavier = stiffer + dampable)
-const CHASSIS_DEFORM: f32 = 0.14; // stays elastic under driving loads; dents past ~14% strain
-const CHASSIS_BREAK: f32 = 0.55; // severs past 55% strain (hard crashes)
+// 18*CHASSIS_D*inv_mass*dt < ~2 — so a faster substep rate and heavier nodes are
+// what let us damp the stiff beams hard enough to kill the jelly wobble.
+// Strong damping (not extreme stiffness) is what kills the jelly wobble: the old
+// 1 kHz rate couldn't damp hard enough so stiff beams just rang. At 2 kHz we damp
+// to ~0.45 of critical, so a moderate stiffness feels solid AND still crumples.
+const CHASSIS_K: f32 = 650_000.0; // axis-beam stiffness (rigid to drive, still crushable)
+const CHASSIS_DIAG: f32 = 1.6; // diagonal beams = CHASSIS_K * this — the shear/torsion bracing
+const CHASSIS_D: f32 = 1_900.0; // strong damping (stable at 2 kHz, mass 12) — no ringing
+const CHASSIS_NODE_MASS: f32 = 12.0; // ~45*12 = 540 kg chassis
+const CHASSIS_DEFORM: f32 = 0.05; // stays elastic under driving loads; dents past ~5% strain
+const CHASSIS_BREAK: f32 = 0.40; // severs past 40% strain (hard crashes)
+
+// A long-range skeleton tying the 8 cage corners together. Adjacent-cell beams
+// alone leave the cage free to shear/twist globally (a big part of the "jelly"
+// feel); these braces lock the overall shape elastically but yield/break readily
+// so a hard crash still collapses the skeleton and lets the body crumple.
+const BRACE_K: f32 = 1_000_000.0;
+const BRACE_D: f32 = 1_800.0;
+const BRACE_DEFORM: f32 = 0.04;
+const BRACE_BREAK: f32 = 0.12;
 
 // Each wheel hub mounts to SUSP_MOUNTS spread-out chassis nodes (triangulated so
 // the wheel can't pivot/wobble about a single cluster). The mounts are biased
 // *inboard* (toward the car centre) so the suspension beams angle inward and
 // locate the wheel laterally — stops it popping in/out of the body.
-const SUSP_MOUNTS: usize = 3;
+const SUSP_MOUNTS: usize = 5;
 const SUSP_INBOARD_X: f32 = 0.55; // 0=at centre, 1=under the wheel (lengthwise)
 const SUSP_INBOARD_Z: f32 = 0.20; // 0=at centreline, 1=under the wheel (sideways)
-const SUSP_K: f32 = 48_000.0; // suspension spring (softer than chassis)
-const SUSP_D: f32 = 1_900.0;
-const SUSP_DEFORM: f32 = 0.35; // suspension flexes a lot before taking a set
+const SUSP_K: f32 = 140_000.0; // firm suspension (locates the wheel hard)
+const SUSP_D: f32 = 2_400.0;
+const SUSP_DEFORM: f32 = 0.30; // suspension flexes before taking a set
 const SUSP_BREAK: f32 = 1.20; // and is hard to snap off
 const HUB_MASS: f32 = 20.0;
 
@@ -82,6 +108,10 @@ pub struct Car {
     rear: Vec<u32>,
     left: Vec<u32>,
     right: Vec<u32>,
+    // Scratch buffers for the parallel self-collision gather (reused each substep
+    // to avoid per-substep allocation): per-node net force + one buffer per thread.
+    self_force: Vec<[f32; 3]>,
+    self_bufs: Vec<Vec<[f32; 3]>>,
     // Controls.
     steer: f32,
     throttle: f32,
@@ -126,8 +156,10 @@ impl Car {
                 }
             }
         }
-        // Connect each node to its forward 26-neighbourhood: axis beams (stiff),
-        // face/body diagonals (softer) for shear/rigidity. Forward-only avoids dups.
+        // Connect each node to its forward 26-neighbourhood. The DIAGONALS are the
+        // shear/torsion bracing — they (not the axis beams) are what resist the
+        // chassis twisting under cornering load, so they must be the *stiffest*
+        // members, not the softest. Forward-only iteration avoids duplicate beams.
         for xi in 0..CHASSIS_NX {
             for yi in 0..CHASSIS_NY {
                 for zi in 0..CHASSIS_NZ {
@@ -144,12 +176,32 @@ impl Car {
                                 }
                                 let b = grid[gidx(nxi, nyi, nzi)];
                                 let order = dx + dy + dz; // 1 axis, 2 face-diag, 3 body-diag
-                                let k = if order == 1 { CHASSIS_K } else { CHASSIS_K * 0.6 };
+                                // Diagonals stiffer than axis beams (shear bracing).
+                                let k = if order == 1 { CHASSIS_K } else { CHASSIS_K * CHASSIS_DIAG };
                                 connect(&mut nodes, &mut beams, a, b, k, CHASSIS_D, CHASSIS_DEFORM, CHASSIS_BREAK);
                             }
                         }
                     }
                 }
+            }
+        }
+
+        // --- Long-range corner skeleton. ---
+        // Adjacent-cell beams leave the cage free to shear/twist as a whole;
+        // tying the 8 cage corners together with stiff long braces locks the
+        // global shape (the main fix for the "jelly" feel).
+        let corners: Vec<u32> = [0, CHASSIS_NX - 1]
+            .iter()
+            .flat_map(|&xi| {
+                [0, CHASSIS_NY - 1].iter().flat_map(move |&yi| {
+                    [0, CHASSIS_NZ - 1].iter().map(move |&zi| (xi, yi, zi))
+                })
+            })
+            .map(|(xi, yi, zi)| grid[gidx(xi, yi, zi)])
+            .collect();
+        for i in 0..corners.len() {
+            for j in (i + 1)..corners.len() {
+                connect(&mut nodes, &mut beams, corners[i], corners[j], BRACE_K, BRACE_D, BRACE_DEFORM, BRACE_BREAK);
             }
         }
 
@@ -188,9 +240,13 @@ impl Car {
         }
 
         let structure = Structure::new(nodes, beams);
+        // The car runs at a higher substep rate than the generic solver default
+        // so its stiff chassis/suspension beams stay stable and well-damped.
+        let mut params = SolverParams::default();
+        params.substep_dt = 1.0 / SUBSTEP_HZ;
         Car {
             structure,
-            params: SolverParams::default(),
+            params,
             wheels,
             drivetrain: Drivetrain::new(),
             obstacles: scene::obstacle_boxes(),
@@ -198,6 +254,8 @@ impl Car {
             rear,
             left,
             right,
+            self_force: Vec::new(),
+            self_bufs: Vec::new(),
             steer: 0.0,
             throttle: 0.0,
             brake: 0.0,
@@ -261,9 +319,32 @@ impl Car {
         solver::zero_and_beam_forces(&mut self.structure);
         collision::apply_terrain(&mut self.structure.nodes);
         collision::apply_obstacles(&mut self.structure.nodes, &self.obstacles);
-        collision::apply_self_collision(&mut self.structure.nodes, |i, j| {
-            connected.contains(&(i as u32, j as u32))
-        });
+
+        // Self-collision is the O(n^2) hot path. For a big structure run it on the
+        // thread pool (race-free gather into a scratch buffer); for a small car
+        // (the default) the serial scatter is faster, so don't pay thread overhead.
+        let count = self.structure.nodes.len();
+        let conn = |i: usize, j: usize| {
+            let (lo, hi) = (i.min(j), i.max(j));
+            connected.contains(&(lo as u32, hi as u32))
+        };
+        if count >= PAR_SELF_THRESHOLD {
+            self.self_force.resize(count, [0.0; 3]);
+            collision::self_collision_gather(
+                &self.structure.nodes,
+                &conn,
+                &mut self.self_bufs,
+                &mut self.self_force,
+            );
+            let n = &mut self.structure.nodes;
+            for i in 0..count {
+                n.fx[i] += self.self_force[i][0];
+                n.fy[i] += self.self_force[i][1];
+                n.fz[i] += self.self_force[i][2];
+            }
+        } else {
+            collision::apply_self_collision(&mut self.structure.nodes, conn);
+        }
 
         // Drivetrain: torque from average driven-wheel speed.
         let (mut sum, mut nd) = (0.0f32, 0u32);
@@ -500,10 +581,11 @@ fn connect(
 mod tests {
     use super::*;
 
-    // 1 frame at 60 fps ~= 17 substeps at 1 kHz.
+    // 1 frame at 60 fps ~= SUBSTEP_HZ/60 substeps.
     fn frames(car: &mut Car, n: u32) {
+        let per_frame = (SUBSTEP_HZ / 60.0).round() as u32;
         for _ in 0..n {
-            car.run(17);
+            car.run(per_frame);
         }
     }
 
@@ -546,8 +628,9 @@ mod tests {
         // holding the brake past a stop intentionally engages auto-reverse.
         car.set_input(0.0, 1.0, 0.0, false, false);
         let mut min_speed = v;
+        let per_frame = (SUBSTEP_HZ / 60.0).round() as u32;
         for _ in 0..60 {
-            car.run(17);
+            car.run(per_frame);
             min_speed = min_speed.min(car.speed_kmh());
         }
         assert!(min_speed < v * 0.5, "brakes should clearly slow the car (min {} vs {})", min_speed, v);
