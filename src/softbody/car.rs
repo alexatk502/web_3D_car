@@ -9,7 +9,7 @@ use crate::scene::{self, ObstacleBox};
 use crate::softbody::drivetrain::{Drivetrain, Mode};
 use crate::softbody::solver::{self, SolverParams};
 use crate::softbody::structure::{BeamKind, Beams, Nodes, Structure};
-use crate::softbody::{collision, tire};
+use crate::softbody::{collision, tire, tire_body};
 use glam::{Mat3, Quat, Vec3};
 use std::collections::HashSet;
 
@@ -101,6 +101,11 @@ pub struct Wheel {
     pub spin: f32,  // accumulated spin angle (rad) for rendering
     pub inertia: f32,
     pub contact: bool,
+    // Deformable tread ring (node/beam tire shell around the hub).
+    pub tread: Vec<u32>,
+    pub tread_angles: Vec<f32>,
+    pub pressure: f32,           // inflation 0..1 (0 = blown flat)
+    pub tire_beams: (usize, usize), // [start,end) range of this tire's beams
 }
 
 pub struct Car {
@@ -109,6 +114,7 @@ pub struct Car {
     pub wheels: Vec<Wheel>,
     pub drivetrain: Drivetrain,
     obstacles: Vec<ObstacleBox>,
+    chassis_n: usize, // number of chassis grid nodes (the first nodes in the array)
     // Reference node groups used to derive the (deformable) car frame.
     front: Vec<u32>,
     rear: Vec<u32>,
@@ -241,6 +247,11 @@ impl Car {
             for c in mounts {
                 connect(&mut nodes, &mut beams, hub, c, SUSP_K, SUSP_D, SUSP_DEFORM, SUSP_BREAK);
             }
+            // Deformable tread ring around the hub (wheel plane = local XY at build).
+            let tb_start = beams.len();
+            let (tread, tread_angles) =
+                tire_body::build_tire(&mut nodes, &mut beams, hub, hl, [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], WHEEL_RADIUS);
+            let tb_end = beams.len();
             wheels.push(Wheel {
                 node: hub,
                 radius: WHEEL_RADIUS,
@@ -250,6 +261,10 @@ impl Car {
                 spin: 0.0,
                 inertia: WHEEL_INERTIA,
                 contact: false,
+                tread,
+                tread_angles,
+                pressure: 1.0,
+                tire_beams: (tb_start, tb_end),
             });
         }
 
@@ -276,6 +291,7 @@ impl Car {
             wheels,
             drivetrain: Drivetrain::new(),
             obstacles: scene::obstacle_boxes(),
+            chassis_n: chassis.len(),
             front,
             rear,
             left,
@@ -343,6 +359,8 @@ impl Car {
         for w in &mut self.wheels {
             w.omega = 0.0;
             w.contact = false;
+            w.spin = 0.0;
+            w.pressure = 1.0; // re-inflate (un-blowout)
         }
         self.drivetrain.reset();
         self.steer = 0.0;
@@ -440,6 +458,7 @@ impl Car {
         // Snapshot scalar controls for the loop (avoid borrow conflicts).
         let (steer, brake, handbrake) = (self.steer, self.brake, self.handbrake);
         let nodes = &mut self.structure.nodes;
+        let beams = &self.structure.beams; // for tire blowout detection (disjoint field)
         let wheels = &mut self.wheels;
 
         for w in wheels.iter_mut() {
@@ -508,6 +527,30 @@ impl Car {
 
             // Accumulate the visual spin angle.
             w.spin += w.omega * dt;
+
+            // Deformable tread ring: pressure + spin motor + axle-centering + squat.
+            let axle = lat; // wheel spin axis
+            let b_plane = axle.cross(heading).normalize_or_zero(); // in-plane "up"
+            tire_body::apply_tire(
+                nodes,
+                &w.tread,
+                &w.tread_angles,
+                w.node as usize,
+                heading,
+                b_plane,
+                axle,
+                w.radius,
+                w.spin,
+                w.pressure,
+                dt,
+            );
+            // Blowout: once any of this tire's beams snaps, it deflates.
+            if w.pressure > 0.0 {
+                let (bs, be) = w.tire_beams;
+                if (bs..be).any(|bi| beams.broken[bi]) {
+                    w.pressure = 0.0;
+                }
+            }
         }
     }
 
@@ -611,9 +654,10 @@ impl Car {
         (CAGE_MIN, CAGE_MAX)
     }
 
-    /// Number of chassis (non-wheel) nodes — the first `chassis_count` nodes.
+    /// Number of chassis grid nodes — the first `chassis_count` nodes (the body
+    /// skins to these; hub + tread nodes follow them).
     pub fn chassis_count(&self) -> usize {
-        self.structure.nodes.len() - self.wheels.len()
+        self.chassis_n
     }
 
     /// Rest (spawn) positions of the chassis nodes, flat [x,y,z, ...]. Used by JS
@@ -709,6 +753,46 @@ mod tests {
         for i in 0..car.structure.nodes.len() {
             assert!(car.structure.nodes.py[i].is_finite());
         }
+    }
+
+    #[test]
+    fn tires_stay_round_and_finite() {
+        // Stability gate: after settling, every tread node is finite and within a
+        // sane radius of its hub (the pressurized ring hasn't collapsed/exploded).
+        let mut car = Car::new();
+        frames(&mut car, 120);
+        let n = &car.structure.nodes;
+        for w in &car.wheels {
+            let h = w.node as usize;
+            let hp = Vec3::new(n.px[h], n.py[h], n.pz[h]);
+            for &t in &w.tread {
+                let ti = t as usize;
+                let p = Vec3::new(n.px[ti], n.py[ti], n.pz[ti]);
+                assert!(
+                    p.x.is_finite() && p.y.is_finite() && p.z.is_finite(),
+                    "tread node went non-finite"
+                );
+                let d = (p - hp).length();
+                assert!(
+                    d > 0.5 * WHEEL_RADIUS && d < 1.6 * WHEEL_RADIUS,
+                    "tread radius out of range: {} (R={})",
+                    d,
+                    WHEEL_RADIUS
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn tire_blows_out_when_beam_breaks() {
+        let mut car = Car::new();
+        frames(&mut car, 30);
+        // Snap the first beam of wheel 0's tire.
+        let (bs, _be) = car.wheels[0].tire_beams;
+        car.structure.beams.broken[bs] = true;
+        frames(&mut car, 5);
+        assert_eq!(car.wheels[0].pressure, 0.0, "tire should deflate when a beam snaps");
+        assert_eq!(car.wheels[1].pressure, 1.0, "other tires stay inflated");
     }
 
     #[test]

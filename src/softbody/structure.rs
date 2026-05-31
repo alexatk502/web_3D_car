@@ -16,6 +16,8 @@ pub enum BeamKind {
     /// Input-driven rest length (steering rack, etc.). Rest length is set each
     /// frame from controls.
     Hydro,
+    /// Tire structure (spokes / tread ring). Deformable; breaks for blowouts.
+    Tire,
 }
 
 /// Point masses. `inv_mass == 0` marks a pinned/static node (infinite mass).
@@ -35,6 +37,9 @@ pub struct Nodes {
     /// Wheel hub nodes: their ground interaction is handled by the tire model,
     /// so the generic node↔terrain collision skips them.
     pub is_wheel: Vec<bool>,
+    /// Tire tread nodes: terrain contact is handled (normal-only, for squat) in
+    /// the per-wheel routine, so the generic node↔terrain collision skips them.
+    pub is_tire: Vec<bool>,
 }
 
 impl Nodes {
@@ -56,11 +61,16 @@ impl Nodes {
         self.inv_mass.push(if mass > 0.0 { 1.0 / mass } else { 0.0 });
         self.radius.push(radius);
         self.is_wheel.push(false);
+        self.is_tire.push(false);
         idx
     }
 
     pub fn mark_wheel(&mut self, i: u32) {
         self.is_wheel[i as usize] = true;
+    }
+
+    pub fn mark_tire(&mut self, i: u32) {
+        self.is_tire[i as usize] = true;
     }
 
     #[inline]

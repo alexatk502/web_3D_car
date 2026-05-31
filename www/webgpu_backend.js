@@ -227,6 +227,38 @@ export class WebGPUBackend {
     this.body = { vbos, triBuf, bg, triCount: triIndices.length };
   }
 
+  // Deformable tire meshes: `count` vertex buffers (one per wheel), shared topo.
+  setTire({ maxVerts, triIndices, color, count }) {
+    const dev = this.device;
+    const n = Math.max(1, count || 1);
+    const vbos = [];
+    for (let c = 0; c < n; c++) {
+      vbos.push(
+        dev.createBuffer({
+          size: maxVerts * 24,
+          usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+        })
+      );
+    }
+    const triBuf = dev.createBuffer({
+      size: align4(triIndices.byteLength),
+      usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
+    });
+    dev.queue.writeBuffer(triBuf, 0, triIndices);
+    const ubo = dev.createBuffer({
+      size: 80,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    const ident = new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1]);
+    dev.queue.writeBuffer(ubo, 0, ident);
+    dev.queue.writeBuffer(ubo, 64, new Float32Array([...color, 1.0]));
+    const bg = dev.createBindGroup({
+      layout: this.objBGL,
+      entries: [{ binding: 0, resource: { buffer: ubo } }],
+    });
+    this.tire = { vbos, triBuf, bg, triCount: triIndices.length };
+  }
+
   setSize(w, h) {
     // Canvas backing store is sized by the caller; (re)create the depth target.
     if (this.depthTexture) this.depthTexture.destroy();
@@ -294,6 +326,20 @@ export class WebGPUBackend {
         dev.queue.writeBuffer(this.body.vbos[c], 0, list[c]);
         pass.setVertexBuffer(0, this.body.vbos[c]);
         pass.drawIndexed(this.body.triCount);
+      }
+    }
+
+    // Deformable tires: one mesh per wheel, each its own vertex buffer.
+    if (this.tire && opts && opts.tire && opts.tire.interleavedList) {
+      pass.setPipeline(this.bodyPipeline);
+      pass.setBindGroup(0, this.frameBG);
+      pass.setBindGroup(1, this.tire.bg);
+      pass.setIndexBuffer(this.tire.triBuf, "uint16");
+      const list = opts.tire.interleavedList;
+      for (let c = 0; c < list.length && c < this.tire.vbos.length; c++) {
+        dev.queue.writeBuffer(this.tire.vbos[c], 0, list[c]);
+        pass.setVertexBuffer(0, this.tire.vbos[c]);
+        pass.drawIndexed(this.tire.triCount);
       }
     }
 

@@ -8,6 +8,7 @@ pub mod drivetrain;
 pub mod solver;
 pub mod structure;
 pub mod tire;
+pub mod tire_body;
 
 use solver::SolverParams;
 use structure::Structure;

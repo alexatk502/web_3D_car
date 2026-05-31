@@ -6,6 +6,7 @@ import init, { World, initThreadPool } from "./pkg/web_3d_car.js";
 import { createRenderer } from "./renderer.js";
 import { buildMesh } from "./meshes.js";
 import { buildCarBody } from "./carbody.js";
+import { buildTire } from "./tirebody.js";
 import { Input } from "./input.js";
 import { UI } from "./ui.js";
 import { Audio } from "./audio.js";
@@ -55,11 +56,16 @@ async function main() {
   let totalTris = 0;
   let carCount = 0;
   let bodies = []; // one skinnable body instance per car (own vertex buffers)
+  let tires = []; // one tire mesh per wheel (carCount*wheelsPerCar) when deformable
   let soft = null; // parsed combined soft descriptor
   let softScratch = null; // interleaved [px,py,pz, nx,ny,nz] for all nodes
   let nodeView = null;
   let lineView = null;
   let bufView = null;
+  let lastDeformable = null; // detect the deformable-tire toggle changing
+  const wheelsPerCar = carDesc.wheelCount;
+  const chassisCount = carDesc.chassisCount;
+  const treadN = carDesc.treadN;
 
   const refreshNodeView = () => {
     nodeView = new Float32Array(
@@ -86,18 +92,25 @@ async function main() {
   const rebuildWorld = () => {
     carCount = world.car_count();
     objCount = world.object_count();
+    const deformable = ui.state.deformableTires;
+    lastDeformable = deformable;
+    const wheelTotal = world.wheel_count();
 
-    // Static meshes + 4 wheel cylinders per car (identical geometry).
+    // Static meshes. In rigid-tire mode also append a wheel cylinder per wheel
+    // (drawn via WASM model matrices); in deformable mode the tires are dynamic
+    // skinned meshes instead, so the cylinders are omitted.
     const meshes = staticMeshes.slice();
-    for (let i = 0; i < world.wheel_count(); i++) {
-      meshes.push(
-        buildMesh({
-          kind: "cylinder",
-          radius: carDesc.wheelRadius,
-          halfWidth: carDesc.wheelHalfWidth,
-          color: carDesc.wheelColor,
-        })
-      );
+    if (!deformable) {
+      for (let i = 0; i < wheelTotal; i++) {
+        meshes.push(
+          buildMesh({
+            kind: "cylinder",
+            radius: carDesc.wheelRadius,
+            halfWidth: carDesc.wheelHalfWidth,
+            color: carDesc.wheelColor,
+          })
+        );
+      }
     }
     totalTris = meshes.reduce((a, m) => a + m.triCount, 0);
     backend.uploadMeshes(meshes);
@@ -122,6 +135,21 @@ async function main() {
       count: carCount,
     });
 
+    // Deformable tire meshes: one per wheel, skinned from the tread ring nodes.
+    if (deformable) {
+      tires = Array.from({ length: wheelTotal }, () =>
+        buildTire(treadN, carDesc.wheelHalfWidth, carDesc.wheelColor)
+      );
+      backend.setTire({
+        maxVerts: tires[0].vCount,
+        triIndices: tires[0].triIndices,
+        color: carDesc.wheelColor,
+        count: wheelTotal,
+      });
+    } else {
+      tires = [];
+    }
+
     refreshView();
     refreshNodeView();
   };
@@ -142,7 +170,6 @@ async function main() {
   ui.onChange(resize);
 
   rebuildWorld();
-  const chassisCount = carDesc.chassisCount;
   let last = performance.now();
   let fpsTimer = 0,
     fpsFrames = 0,
@@ -162,6 +189,10 @@ async function main() {
     }
     if (wld.spawnCar) {
       world.spawn_near_active(8.0, 3.0);
+      rebuildWorld();
+    }
+    // Rebuild if the deformable-tire toggle changed.
+    if (ui.state.deformableTires !== lastDeformable) {
       rebuildWorld();
     }
 
@@ -219,6 +250,24 @@ async function main() {
       wireframe: ui.state.wireframe,
       body: { interleavedList },
     };
+
+    // Deformable tires: skin each wheel's tread ring from its node slice. Per-car
+    // node layout is [chassis…][hub, tread×treadN] per wheel, so wheel w of car c
+    // starts at: car_offset + chassisCount + w*(1+treadN).
+    if (tires.length > 0) {
+      const tireList = [];
+      for (let c = 0; c < carCount; c++) {
+        const off = world.car_node_offset(c);
+        for (let w = 0; w < wheelsPerCar; w++) {
+          const hubG = off + chassisCount + w * (1 + treadN);
+          const hub = [nodeView[hubG * 3], nodeView[hubG * 3 + 1], nodeView[hubG * 3 + 2]];
+          const treadFlat = nodeView.subarray((hubG + 1) * 3, (hubG + 1 + treadN) * 3);
+          tireList.push(tires[c * wheelsPerCar + w].skin(hub, treadFlat));
+        }
+      }
+      renderOpts.tire = { interleavedList: tireList };
+    }
+
     // Node/beam structure overlay (toggle) — useful for seeing deformation.
     if (ui.state.showStructure) {
       const lineCount = world.line_count();

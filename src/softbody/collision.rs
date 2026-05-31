@@ -25,8 +25,8 @@ const CROSS_D: f32 = 3_000.0;
 /// terrain surface normal (gradient) for both push-out and friction.
 pub fn apply_terrain(n: &mut Nodes) {
     for i in 0..n.len() {
-        if n.inv_mass[i] == 0.0 || n.is_wheel[i] {
-            continue; // pinned, or a wheel hub (handled by the tire model)
+        if n.inv_mass[i] == 0.0 || n.is_wheel[i] || n.is_tire[i] {
+            continue; // pinned, wheel hub, or tire tread (handled by the tire model)
         }
         let r = n.radius[i];
         let ground = scene::terrain_height(n.px[i], n.pz[i]);
@@ -297,10 +297,10 @@ pub fn self_collision_gather<F>(
     bufs.par_iter_mut().enumerate().for_each(|(t, buf)| {
         let mut i = t;
         while i < count {
-            if n.inv_mass[i] != 0.0 {
+            if n.inv_mass[i] != 0.0 && !n.is_tire[i] {
                 let (pxi, pyi, pzi, ri) = (n.px[i], n.py[i], n.pz[i], n.radius[i]);
                 for j in (i + 1)..count {
-                    if n.inv_mass[j] == 0.0 || connected(i, j) {
+                    if n.inv_mass[j] == 0.0 || n.is_tire[j] || connected(i, j) {
                         continue;
                     }
                     let dx = n.px[j] - pxi;
@@ -382,11 +382,11 @@ pub fn cross_body_collision(a: &mut Nodes, b: &mut Nodes) {
 pub fn apply_self_collision<F: Fn(usize, usize) -> bool>(n: &mut Nodes, connected: F) {
     let count = n.len();
     for i in 0..count {
-        if n.inv_mass[i] == 0.0 {
+        if n.inv_mass[i] == 0.0 || n.is_tire[i] {
             continue;
         }
         for j in (i + 1)..count {
-            if n.inv_mass[j] == 0.0 || connected(i, j) {
+            if n.inv_mass[j] == 0.0 || n.is_tire[j] || connected(i, j) {
                 continue;
             }
             let dx = n.px[j] - n.px[i];

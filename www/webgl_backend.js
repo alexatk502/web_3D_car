@@ -116,6 +116,25 @@ export class WebGLBackend {
     this.body = { vao, vbo, color, triCount: triIndices.length };
   }
 
+  // Dynamic deformable-tire mesh template (one shared topology, drawn per wheel).
+  setTire({ maxVerts, triIndices, color }) {
+    const gl = this.gl;
+    const vao = gl.createVertexArray();
+    gl.bindVertexArray(vao);
+    const vbo = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+    gl.bufferData(gl.ARRAY_BUFFER, maxVerts * 24, gl.DYNAMIC_DRAW);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 24, 0);
+    gl.enableVertexAttribArray(1);
+    gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 24, 12);
+    const triBuf = gl.createBuffer();
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, triBuf);
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, triIndices, gl.STATIC_DRAW);
+    gl.bindVertexArray(null);
+    this.tire = { vao, vbo, color, triCount: triIndices.length };
+  }
+
   setSize(w, h) {
     this.gl.viewport(0, 0, w, h);
   }
@@ -153,6 +172,20 @@ export class WebGLBackend {
       for (const interleaved of opts.body.interleavedList) {
         gl.bufferSubData(gl.ARRAY_BUFFER, 0, interleaved);
         gl.drawElements(gl.TRIANGLES, this.body.triCount, gl.UNSIGNED_SHORT, 0);
+      }
+      gl.enable(gl.CULL_FACE);
+    }
+
+    // Deformable tires: one shared mesh template, drawn once per wheel.
+    if (this.tire && opts && opts.tire && opts.tire.interleavedList) {
+      gl.disable(gl.CULL_FACE);
+      gl.uniformMatrix4fv(this.loc.model, false, IDENTITY);
+      gl.uniform3fv(this.loc.color, this.tire.color);
+      gl.bindVertexArray(this.tire.vao);
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.tire.vbo);
+      for (const interleaved of opts.tire.interleavedList) {
+        gl.bufferSubData(gl.ARRAY_BUFFER, 0, interleaved);
+        gl.drawElements(gl.TRIANGLES, this.tire.triCount, gl.UNSIGNED_SHORT, 0);
       }
       gl.enable(gl.CULL_FACE);
     }

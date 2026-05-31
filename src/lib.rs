@@ -533,9 +533,9 @@ fn car_descriptor_json(car: &Car) -> String {
     let (cmin, cmax) = car.cage();
     let mut s = format!(
         "{{\"wheelRadius\":{},\"wheelHalfWidth\":{},\"wheelColor\":[0.08,0.08,0.10],\
-         \"bodyColor\":[0.80,0.16,0.16],\"wheelCount\":{},\
+         \"bodyColor\":[0.80,0.16,0.16],\"wheelCount\":{},\"treadN\":{},\
          \"cageMin\":[{},{},{}],\"cageMax\":[{},{},{}],\"chassisCount\":{},\"chassisRest\":[",
-        radius, half_width, car.wheel_count(),
+        radius, half_width, car.wheel_count(), softbody::tire_body::TREAD_N,
         cmin[0], cmin[1], cmin[2], cmax[0], cmax[1], cmax[2], car.chassis_count()
     );
     for (k, v) in car.chassis_rest().iter().enumerate() {

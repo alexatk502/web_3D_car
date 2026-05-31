@@ -11,6 +11,7 @@ export class UI {
       wireframe: false,
       showStructure: false,
       sound: false,
+      deformableTires: true,
     };
     this._changeCbs = [];
 
@@ -22,6 +23,7 @@ export class UI {
       wire: document.getElementById("wire"),
       struct: document.getElementById("struct"),
       sound: document.getElementById("sound"),
+      deftires: document.getElementById("deftires"),
       backendSel: document.getElementById("backendSel"),
       backendName: document.getElementById("backendName"),
       hudFps: document.getElementById("hudFps"),
@@ -46,6 +48,7 @@ export class UI {
     this.el.wire.checked = this.state.wireframe;
     this.el.struct.checked = this.state.showStructure;
     this.el.sound.checked = this.state.sound;
+    this.el.deftires.checked = this.state.deformableTires;
     this.el.backendSel.value = this.forcedBackend() || "auto";
 
     this.el.scale.addEventListener("input", () => {
@@ -65,6 +68,9 @@ export class UI {
     });
     this.el.sound.addEventListener("change", () => {
       this.state.sound = this.el.sound.checked;
+    });
+    this.el.deftires.addEventListener("change", () => {
+      this.state.deformableTires = this.el.deftires.checked;
     });
     // Changing the backend reloads with a ?backend= override.
     this.el.backendSel.addEventListener("change", () => {
