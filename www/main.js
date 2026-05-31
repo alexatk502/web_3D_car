@@ -40,77 +40,90 @@ async function main() {
   // The descriptor (geometry + colors) is the single source of truth for sizes.
   const descriptor = JSON.parse(world.descriptor);
   const carDesc = JSON.parse(world.car_descriptor);
-  const meshes = descriptor.map(buildMesh);
-  // Append one cylinder mesh per wheel; they render with WASM model matrices
-  // (positioned at the hub nodes, steered + spun).
-  for (let i = 0; i < carDesc.wheelCount; i++) {
-    meshes.push(
-      buildMesh({
-        kind: "cylinder",
-        radius: carDesc.wheelRadius,
-        halfWidth: carDesc.wheelHalfWidth,
-        color: carDesc.wheelColor,
-      })
-    );
-  }
-  const totalTris = meshes.reduce((a, m) => a + m.triCount, 0);
-  const objCount = world.object_count(); // static + wheels = meshes.length
+  const staticMeshes = descriptor.map(buildMesh); // terrain + obstacles + patches
 
   const canvas = document.getElementById("gl");
   const ui = new UI();
   const { backend, name, zeroToOne } = await createRenderer(canvas, ui.forcedBackend());
   ui.setBackendName(name);
-  backend.uploadMeshes(meshes);
 
-  // Soft-body debug mesh: beams drawn as lines, vertices follow the nodes.
-  const soft = JSON.parse(world.soft_descriptor);
-  const softLineIndices = new Uint16Array(soft.beams);
-  backend.setSoftBody({
-    nodeCount: soft.nodeCount,
-    lineIndices: softLineIndices,
-    color: soft.color,
-  });
-  // Skinned car body (FFD over the 8 chassis nodes).
-  const body = buildCarBody(carDesc);
-  backend.setBody({
-    maxVerts: body.vCount,
-    triIndices: body.triIndices,
-    color: body.color,
-  });
+  const input = new Input(canvas);
+  const audio = new Audio();
 
-  // Scratch interleaved [px,py,pz, nx,ny,nz] per node; normals preset to up so
-  // the debug lines render at near-full brightness.
-  const softScratch = new Float32Array(soft.nodeCount * 6);
-  for (let i = 0; i < soft.nodeCount; i++) {
-    softScratch[i * 6 + 4] = 1.0; // ny = 1
-  }
+  // --- World-dependent state, rebuilt whenever the car count changes (spawn). ---
+  let objCount = 0; // static + 4 wheels per car
+  let totalTris = 0;
+  let carCount = 0;
+  let bodies = []; // one skinnable body instance per car (own vertex buffers)
+  let soft = null; // parsed combined soft descriptor
+  let softScratch = null; // interleaved [px,py,pz, nx,ny,nz] for all nodes
   let nodeView = null;
   let lineView = null;
+  let bufView = null;
+
   const refreshNodeView = () => {
     nodeView = new Float32Array(
       wasm.memory.buffer,
       world.node_buffer_ptr(),
       world.node_buffer_len()
     );
-    lineView = new Uint16Array(
+    // Line indices are global node indices across all cars → 32-bit.
+    lineView = new Uint32Array(
       wasm.memory.buffer,
       world.line_buffer_ptr(),
       world.line_buffer_len()
     );
   };
-
-  const input = new Input(canvas);
-  const audio = new Audio();
-
-  // Zero-copy view over the shared buffer. Re-created if WASM memory grows
-  // (which detaches the old ArrayBuffer).
-  let bufView = null;
   const refreshView = () => {
     bufView = new Float32Array(
       wasm.memory.buffer,
       world.buffer_ptr(),
       world.buffer_len()
     );
+  };
+
+  // (Re)build all per-car-count GPU resources. Called at startup and after a spawn.
+  const rebuildWorld = () => {
+    carCount = world.car_count();
+    objCount = world.object_count();
+
+    // Static meshes + 4 wheel cylinders per car (identical geometry).
+    const meshes = staticMeshes.slice();
+    for (let i = 0; i < world.wheel_count(); i++) {
+      meshes.push(
+        buildMesh({
+          kind: "cylinder",
+          radius: carDesc.wheelRadius,
+          halfWidth: carDesc.wheelHalfWidth,
+          color: carDesc.wheelColor,
+        })
+      );
+    }
+    totalTris = meshes.reduce((a, m) => a + m.triCount, 0);
+    backend.uploadMeshes(meshes);
+
+    // Combined soft-body line mesh (all cars' nodes; global indices).
+    soft = JSON.parse(world.soft_descriptor);
+    backend.setSoftBody({
+      nodeCount: soft.nodeCount,
+      lineIndices: new Uint32Array(soft.beams),
+      color: soft.color,
+    });
+    softScratch = new Float32Array(soft.nodeCount * 6);
+    for (let i = 0; i < soft.nodeCount; i++) softScratch[i * 6 + 4] = 1.0; // ny=1
+
+    // One body instance per car (own reused interleaved buffer); all share the
+    // same skinning data since the structure is identical.
+    bodies = Array.from({ length: carCount }, () => buildCarBody(carDesc));
+    backend.setBody({
+      maxVerts: bodies[0].vCount,
+      triIndices: bodies[0].triIndices,
+      color: bodies[0].color,
+      count: carCount,
+    });
+
+    refreshView();
+    refreshNodeView();
   };
 
   // Size the canvas backing store = CSS size * render scale.
@@ -128,8 +141,8 @@ async function main() {
   window.addEventListener("resize", resize);
   ui.onChange(resize);
 
-  refreshView();
-  refreshNodeView();
+  rebuildWorld();
+  const chassisCount = carDesc.chassisCount;
   let last = performance.now();
   let fpsTimer = 0,
     fpsFrames = 0,
@@ -141,6 +154,16 @@ async function main() {
     last = now;
     lastMs = dt * 1000;
     resize();
+
+    // Fleet actions: Tab switches the active car, B spawns one (then rebuild).
+    const wld = input.takeWorld();
+    if (wld.switchCar && world.car_count() > 1) {
+      world.set_active((world.active_car() + 1) % world.car_count());
+    }
+    if (wld.spawnCar) {
+      world.spawn_near_active(8.0, 3.0);
+      rebuildWorld();
+    }
 
     // Drive the simulation.
     const d = input.driver();
@@ -182,12 +205,19 @@ async function main() {
     const proj = perspective(deg2rad(ui.state.fovDeg), aspect, 0.1, 500, zeroToOne);
     const viewProj = multiply(proj, view);
 
-    // Skin the body to the chassis nodes (indices 0..chassisCount).
-    const bodyInterleaved = body.skin(nodeView.subarray(0, carDesc.chassisCount * 3));
+    // Skin each car's body to its own chassis-node slice. Each `bodies[c]` is a
+    // separate instance, so the returned interleaved buffers don't alias.
+    const interleavedList = [];
+    for (let c = 0; c < carCount; c++) {
+      const off = world.car_node_offset(c);
+      interleavedList.push(
+        bodies[c].skin(nodeView.subarray(off * 3, (off + chassisCount) * 3))
+      );
+    }
 
     const renderOpts = {
       wireframe: ui.state.wireframe,
-      body: { interleaved: bodyInterleaved },
+      body: { interleavedList },
     };
     // Node/beam structure overlay (toggle) — useful for seeing deformation.
     if (ui.state.showStructure) {

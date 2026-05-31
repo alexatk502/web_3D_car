@@ -16,6 +16,11 @@ const OBSTACLE_K: f32 = 160_000.0;
 const OBSTACLE_DAMP: f32 = 800.0;
 const SELF_K: f32 = 60_000.0; // node-node repulsion stiffness
 
+// Vehicle-vehicle contact. Damped (unlike self-collision) because cars meet at
+// speed and an undamped penalty would explode on deep one-step interpenetration.
+const CROSS_K: f32 = 120_000.0;
+const CROSS_D: f32 = 3_000.0;
+
 /// Add ground contact forces to any node penetrating the terrain. Uses the
 /// terrain surface normal (gradient) for both push-out and friction.
 pub fn apply_terrain(n: &mut Nodes) {
@@ -212,6 +217,23 @@ mod tests {
         }
     }
 
+    #[test]
+    fn cross_body_collision_pushes_apart_and_conserves_momentum() {
+        // Two single-node "cars" overlapping (centres 0.2 apart, radii 0.2 → rsum 0.4).
+        let mut a = Nodes::default();
+        a.push([0.0, 0.0, 0.0], 1.0, 0.2);
+        let mut b = Nodes::default();
+        b.push([0.2, 0.0, 0.0], 1.0, 0.2);
+
+        cross_body_collision(&mut a, &mut b);
+
+        // a is pushed -x, b is pushed +x (apart along the centre line).
+        assert!(a.fx[0] < 0.0, "a should be pushed -x (got {})", a.fx[0]);
+        assert!(b.fx[0] > 0.0, "b should be pushed +x (got {})", b.fx[0]);
+        // Equal and opposite → total force ~0 (momentum conserving).
+        assert!((a.fx[0] + b.fx[0]).abs() < 1e-3, "forces should cancel");
+    }
+
     // Scaling check — run explicitly:
     //   cargo test --release bench_self_collision -- --ignored --nocapture
     #[test]
@@ -309,6 +331,46 @@ pub fn self_collision_gather<F>(
             out[k][0] += buf[k][0];
             out[k][1] += buf[k][1];
             out[k][2] += buf[k][2];
+        }
+    }
+}
+
+/// Vehicle-vehicle collision: bipartite sphere-sphere damped penalty between the
+/// nodes of two different cars. Because the bodies are never beam-connected there
+/// is no skip set — every overlapping cross-pair repels. Writes directly into both
+/// force accumulators (the two `Nodes` are disjoint, so `&mut` to each is safe).
+/// Momentum-conserving: equal and opposite force on each pair.
+pub fn cross_body_collision(a: &mut Nodes, b: &mut Nodes) {
+    for i in 0..a.len() {
+        if a.inv_mass[i] == 0.0 {
+            continue;
+        }
+        let (pxi, pyi, pzi, ri) = (a.px[i], a.py[i], a.pz[i], a.radius[i]);
+        let (vxi, vyi, vzi) = (a.vx[i], a.vy[i], a.vz[i]);
+        for j in 0..b.len() {
+            if b.inv_mass[j] == 0.0 {
+                continue;
+            }
+            let dx = b.px[j] - pxi;
+            let dy = b.py[j] - pyi;
+            let dz = b.pz[j] - pzi;
+            let rsum = ri + b.radius[j];
+            let dist2 = dx * dx + dy * dy + dz * dz;
+            if dist2 >= rsum * rsum || dist2 < 1e-9 {
+                continue;
+            }
+            let dist = dist2.sqrt();
+            let (ux, uy, uz) = (dx / dist, dy / dist, dz / dist);
+            let pen = rsum - dist;
+            // Relative normal velocity (b approaching a is negative → adds push).
+            let rvn = (b.vx[j] - vxi) * ux + (b.vy[j] - vyi) * uy + (b.vz[j] - vzi) * uz;
+            let f = (CROSS_K * pen - CROSS_D * rvn).max(0.0); // only push, never pull
+            b.fx[j] += f * ux;
+            b.fy[j] += f * uy;
+            b.fz[j] += f * uz;
+            a.fx[i] -= f * ux;
+            a.fy[i] -= f * uy;
+            a.fz[i] -= f * uz;
         }
     }
 }

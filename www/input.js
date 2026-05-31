@@ -14,9 +14,12 @@ export class Input {
     this._gearUp = false;
     this._gearDown = false;
     this._toggleManual = false;
+    // Edge-triggered fleet actions (consumed by takeWorld()).
+    this._switchCar = false;
+    this._spawnCar = false;
 
     const block = new Set([
-      "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Space",
+      "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Space", "Tab",
     ]);
     window.addEventListener("keydown", (e) => {
       if (block.has(e.code)) e.preventDefault();
@@ -27,6 +30,9 @@ export class Input {
       if (e.code === "KeyE" && !e.repeat) this._gearUp = true;
       if (e.code === "KeyQ" && !e.repeat) this._gearDown = true;
       if (e.code === "KeyM" && !e.repeat) this._toggleManual = true;
+      // Fleet: Tab switches the active car, B spawns one.
+      if (e.code === "Tab" && !e.repeat) this._switchCar = true;
+      if (e.code === "KeyB" && !e.repeat) this._spawnCar = true;
       this.keys.add(e.code);
     });
     window.addEventListener("keyup", (e) => this.keys.delete(e.code));
@@ -82,6 +88,14 @@ export class Input {
     this._gearDown = false;
     this._toggleManual = false;
     return s;
+  }
+
+  // Consume the edge-triggered fleet actions (called once per frame).
+  takeWorld() {
+    const w = { switchCar: this._switchCar, spawnCar: this._spawnCar };
+    this._switchCar = false;
+    this._spawnCar = false;
+    return w;
   }
 
   // Consume the accumulated orbit deltas (called once per frame).

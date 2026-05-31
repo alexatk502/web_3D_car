@@ -142,15 +142,18 @@ export class WebGLBackend {
       }
     }
 
-    // Skinned car body (solid, no cull). Vertices follow the chassis nodes.
-    if (this.body && opts && opts.body) {
+    // Skinned car bodies (solid, no cull). One shared mesh template re-uploaded
+    // and drawn once per car from its skinned vertex array.
+    if (this.body && opts && opts.body && opts.body.interleavedList) {
       gl.disable(gl.CULL_FACE);
       gl.uniformMatrix4fv(this.loc.model, false, IDENTITY);
       gl.uniform3fv(this.loc.color, this.body.color);
       gl.bindVertexArray(this.body.vao);
       gl.bindBuffer(gl.ARRAY_BUFFER, this.body.vbo);
-      gl.bufferSubData(gl.ARRAY_BUFFER, 0, opts.body.interleaved);
-      gl.drawElements(gl.TRIANGLES, this.body.triCount, gl.UNSIGNED_SHORT, 0);
+      for (const interleaved of opts.body.interleavedList) {
+        gl.bufferSubData(gl.ARRAY_BUFFER, 0, interleaved);
+        gl.drawElements(gl.TRIANGLES, this.body.triCount, gl.UNSIGNED_SHORT, 0);
+      }
       gl.enable(gl.CULL_FACE);
     }
 
@@ -171,13 +174,13 @@ export class WebGLBackend {
           const c = bands[bi];
           if (c > 0) {
             gl.uniform3fv(this.loc.color, STRESS_COLORS[bi]);
-            gl.drawElements(gl.LINES, c, gl.UNSIGNED_SHORT, off * 2); // u16 → byte offset
+            gl.drawElements(gl.LINES, c, gl.UNSIGNED_INT, off * 4); // u32 → byte offset
           }
           off += c;
         }
       } else {
         gl.uniform3fv(this.loc.color, this.soft.color);
-        gl.drawElements(gl.LINES, opts.soft.lineCount, gl.UNSIGNED_SHORT, 0);
+        gl.drawElements(gl.LINES, opts.soft.lineCount, gl.UNSIGNED_INT, 0);
       }
     }
     gl.bindVertexArray(null);

@@ -192,13 +192,22 @@ export class WebGPUBackend {
     this.soft = { vbo, lineBuf, bg, bandBG, lineCount: lineIndices.length };
   }
 
-  // Dynamic skinned car body: static triangle topology, per-frame vertices.
-  setBody({ maxVerts, triIndices, color }) {
+  // Dynamic skinned car bodies: one shared triangle topology, but `count`
+  // separate vertex buffers (one per car) — multiple writeBuffer() calls to the
+  // SAME buffer within a render pass would collapse to the last write, so each
+  // car needs its own buffer.
+  setBody({ maxVerts, triIndices, color, count }) {
     const dev = this.device;
-    const vbo = dev.createBuffer({
-      size: maxVerts * 24,
-      usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
-    });
+    const n = Math.max(1, count || 1);
+    const vbos = [];
+    for (let c = 0; c < n; c++) {
+      vbos.push(
+        dev.createBuffer({
+          size: maxVerts * 24,
+          usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+        })
+      );
+    }
     const triBuf = dev.createBuffer({
       size: align4(triIndices.byteLength),
       usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
@@ -215,7 +224,7 @@ export class WebGPUBackend {
       layout: this.objBGL,
       entries: [{ binding: 0, resource: { buffer: ubo } }],
     });
-    this.body = { vbo, triBuf, bg, triCount: triIndices.length };
+    this.body = { vbos, triBuf, bg, triCount: triIndices.length };
   }
 
   setSize(w, h) {
@@ -274,15 +283,18 @@ export class WebGPUBackend {
       }
     }
 
-    // Skinned car body (solid, no cull). Vertices follow the chassis nodes.
-    if (this.body && opts && opts.body) {
-      dev.queue.writeBuffer(this.body.vbo, 0, opts.body.interleaved);
+    // Skinned car bodies (solid, no cull): one per car, each its own vertex buffer.
+    if (this.body && opts && opts.body && opts.body.interleavedList) {
       pass.setPipeline(this.bodyPipeline);
       pass.setBindGroup(0, this.frameBG);
       pass.setBindGroup(1, this.body.bg);
-      pass.setVertexBuffer(0, this.body.vbo);
       pass.setIndexBuffer(this.body.triBuf, "uint16");
-      pass.drawIndexed(this.body.triCount);
+      const list = opts.body.interleavedList;
+      for (let c = 0; c < list.length && c < this.body.vbos.length; c++) {
+        dev.queue.writeBuffer(this.body.vbos[c], 0, list[c]);
+        pass.setVertexBuffer(0, this.body.vbos[c]);
+        pass.drawIndexed(this.body.triCount);
+      }
     }
 
     // Soft-body debug lines (always drawn as lines, regardless of wireframe).
@@ -295,7 +307,7 @@ export class WebGPUBackend {
         pass.setPipeline(this.wirePipeline);
         pass.setBindGroup(0, this.frameBG);
         pass.setVertexBuffer(0, this.soft.vbo);
-        pass.setIndexBuffer(this.soft.lineBuf, "uint16");
+        pass.setIndexBuffer(this.soft.lineBuf, "uint32");
         const bands = opts.soft.bands;
         if (bands) {
           // Draw each stress band as a colored segment (heatmap).

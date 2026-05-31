@@ -133,7 +133,15 @@ pub struct Car {
 }
 
 impl Car {
+    /// Build the default car at the origin, facing +X.
     pub fn new() -> Self {
+        Self::new_at(Vec3::ZERO, 0.0)
+    }
+
+    /// Build a car spawned at world `pos` (x,z used; y from terrain + lift) with
+    /// heading `yaw` (radians about +Y). The spawn snapshot is taken AFTER the
+    /// transform, so `reset()` returns the car to this pose.
+    pub fn new_at(pos: Vec3, yaw: f32) -> Self {
         let mut nodes = Nodes::default();
         let mut beams = Beams::default();
 
@@ -245,9 +253,15 @@ impl Car {
             });
         }
 
-        // Lift the whole car so the wheels sit on the (flat) spawn ground.
-        let base = scene::terrain_height(0.0, 0.0) + LIFT;
+        // Lift the whole car so the wheels sit on the (flat) spawn ground, then
+        // rotate by yaw about +Y and translate to the spawn position. The car is
+        // built centred on the origin in XZ, so rotate about the origin.
+        let base = scene::terrain_height(pos.x, pos.z) + LIFT;
+        let (sin, cos) = yaw.sin_cos();
         for i in 0..nodes.len() {
+            let (x, z) = (nodes.px[i], nodes.pz[i]);
+            nodes.px[i] = x * cos - z * sin + pos.x;
+            nodes.pz[i] = x * sin + z * cos + pos.z;
             nodes.py[i] += base;
         }
 
@@ -281,6 +295,9 @@ impl Car {
     /// Enable the parallel solver path (call once the rayon pool is ready).
     pub fn set_threaded(&mut self, on: bool) {
         self.threaded = on;
+    }
+    pub fn is_threaded(&self) -> bool {
+        self.threaded
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -338,6 +355,15 @@ impl Car {
     }
 
     fn substep(&mut self) {
+        self.accumulate_forces();
+        self.integrate();
+    }
+
+    /// Accumulate all forces for one substep (beams, terrain, obstacles, self-
+    /// collision, drivetrain, tires) into the node force buffers, WITHOUT
+    /// integrating. The World injects cross-vehicle collision forces between this
+    /// and `integrate()`.
+    pub fn accumulate_forces(&mut self) {
         let dt = self.params.substep_dt;
 
         // Smooth steering toward the target angle.
@@ -483,8 +509,25 @@ impl Car {
             // Accumulate the visual spin angle.
             w.spin += w.omega * dt;
         }
+    }
 
+    /// Integrate node velocities/positions. Call after `accumulate_forces` and any
+    /// externally-injected forces (e.g. cross-vehicle collision).
+    pub fn integrate(&mut self) {
         solver::integrate(&mut self.structure, &self.params);
+    }
+
+    /// World-space AABB over all nodes (min, max), for the cross-vehicle broadphase.
+    pub fn aabb(&self) -> (Vec3, Vec3) {
+        let n = &self.structure.nodes;
+        let mut lo = Vec3::splat(f32::INFINITY);
+        let mut hi = Vec3::splat(f32::NEG_INFINITY);
+        for i in 0..n.len() {
+            let p = Vec3::new(n.px[i], n.py[i], n.pz[i]);
+            lo = lo.min(p);
+            hi = hi.max(p);
+        }
+        (lo, hi)
     }
 
     /// Current car frame (forward, right, up) from the deformable node groups.
