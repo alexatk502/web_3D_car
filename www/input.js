@@ -10,6 +10,10 @@ export class Input {
     this._dragging = false;
     this._lastX = 0;
     this._lastY = 0;
+    // Edge-triggered gearbox actions, consumed once per frame by takeShift().
+    this._gearUp = false;
+    this._gearDown = false;
+    this._toggleManual = false;
 
     const block = new Set([
       "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Space",
@@ -19,6 +23,10 @@ export class Input {
       if (e.code === "KeyC" && !e.repeat) {
         this.cameraMode = (this.cameraMode + 1) % 3;
       }
+      // Gearbox (edge-triggered): E upshift, Q downshift, M toggle auto/manual.
+      if (e.code === "KeyE" && !e.repeat) this._gearUp = true;
+      if (e.code === "KeyQ" && !e.repeat) this._gearDown = true;
+      if (e.code === "KeyM" && !e.repeat) this._toggleManual = true;
       this.keys.add(e.code);
     });
     window.addEventListener("keyup", (e) => this.keys.delete(e.code));
@@ -62,7 +70,18 @@ export class Input {
     if (this.has("KeyD", "ArrowRight")) steer += 1;
     const handbrake = this.has("Space");
     const reset = this.has("KeyR");
-    return { throttle, brake, steer, handbrake, reset };
+    // Clutch pedal: hold Shift to disengage (manual mode).
+    const clutch = this.has("ShiftLeft", "ShiftRight") ? 1 : 0;
+    return { throttle, brake, steer, handbrake, reset, clutch };
+  }
+
+  // Consume the edge-triggered gearbox actions (called once per frame).
+  takeShift() {
+    const s = { up: this._gearUp, down: this._gearDown, toggleManual: this._toggleManual };
+    this._gearUp = false;
+    this._gearDown = false;
+    this._toggleManual = false;
+    return s;
   }
 
   // Consume the accumulated orbit deltas (called once per frame).

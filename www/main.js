@@ -142,7 +142,11 @@ async function main() {
 
     // Drive the simulation.
     const d = input.driver();
-    world.set_input(d.throttle, d.brake, d.steer, d.handbrake, d.reset);
+    const sh = input.takeShift();
+    if (sh.toggleManual) world.toggle_manual();
+    if (sh.up) world.shift_up();
+    if (sh.down) world.shift_down();
+    world.set_input(d.throttle, d.brake, d.steer, d.handbrake, d.reset, d.clutch);
     const orbit = input.takeOrbit();
     world.step(dt, input.cameraMode, orbit.dx, orbit.dy);
 
@@ -207,6 +211,8 @@ async function main() {
         nodes: world.node_count(),
         beams: world.beam_count(),
         substeps: world.substeps_last_frame(),
+        manual: world.is_manual(),
+        clutch: world.clutch(),
       });
     }
     requestAnimationFrame(frame);

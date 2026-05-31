@@ -35,6 +35,7 @@ struct Input {
     steer: f32,
     handbrake: bool,
     reset: bool,
+    clutch: f32, // 0 = engaged, 1 = fully disengaged (manual mode)
 }
 
 /// Cap on solver substeps per render frame (anti-spiral after a tab stall).
@@ -134,15 +135,44 @@ impl World {
         self.car.set_threaded(on);
     }
 
-    /// Set the current input. `steer` is -1..1 (positive = left).
-    pub fn set_input(&mut self, throttle: f32, brake: f32, steer: f32, handbrake: bool, reset: bool) {
+    /// Set the current input. `steer` is -1..1 (positive = left). `clutch` is
+    /// 0 (engaged) .. 1 (disengaged) and only matters in manual mode.
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_input(
+        &mut self,
+        throttle: f32,
+        brake: f32,
+        steer: f32,
+        handbrake: bool,
+        reset: bool,
+        clutch: f32,
+    ) {
         self.input = Input {
             throttle,
             brake,
             steer,
             handbrake,
             reset,
+            clutch,
         };
+    }
+
+    /// Manual gearbox: sequential shift up/down (R-N-1..6) and auto/manual toggle.
+    pub fn shift_up(&mut self) {
+        self.car.shift_up();
+    }
+    pub fn shift_down(&mut self) {
+        self.car.shift_down();
+    }
+    pub fn toggle_manual(&mut self) {
+        self.car.toggle_manual();
+    }
+    pub fn is_manual(&self) -> bool {
+        self.car.is_manual()
+    }
+    /// Clutch engagement 0..1 (1 = locked), for the HUD.
+    pub fn clutch(&self) -> f32 {
+        self.car.clutch_engagement()
     }
 
     /// Advance by `dt` real seconds (substep accumulator), then recompute the
@@ -155,6 +185,7 @@ impl World {
             self.input.steer,
             self.input.handbrake,
             self.input.reset,
+            self.input.clutch,
         );
 
         let substep_dt = self.car.params.substep_dt;
@@ -285,8 +316,8 @@ impl World {
         self.car.rpm()
     }
 
-    /// Current gear (1-based; HUD).
-    pub fn gear(&self) -> u32 {
+    /// Current gear: -1 = reverse, 0 = neutral, 1..=6 forward (HUD formats it).
+    pub fn gear(&self) -> i32 {
         self.car.gear()
     }
 }

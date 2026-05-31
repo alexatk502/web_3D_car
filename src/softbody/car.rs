@@ -6,7 +6,7 @@
 //! Local frame: forward = +X, up = +Y, right = +Z.
 
 use crate::scene::{self, ObstacleBox};
-use crate::softbody::drivetrain::Drivetrain;
+use crate::softbody::drivetrain::{Drivetrain, Mode};
 use crate::softbody::solver::{self, SolverParams};
 use crate::softbody::structure::{BeamKind, Beams, Nodes, Structure};
 use crate::softbody::{collision, tire};
@@ -89,7 +89,6 @@ const WHEEL_CONTACT_D: f32 = 4_000.0;
 
 const BRAKE_TORQUE: f32 = 1_800.0; // per wheel
 const HANDBRAKE_TORQUE: f32 = 3_200.0;
-const REVERSE_TORQUE: f32 = 1_500.0;
 
 const LIFT: f32 = WHEEL_RADIUS + 0.06; // spawn height so wheels rest on flat ground
 
@@ -128,6 +127,7 @@ pub struct Car {
     steer: f32,
     throttle: f32,
     brake: f32,
+    clutch: f32, // clutch pedal 0 (engaged) .. 1 (disengaged); manual mode only
     steer_in: f32,
     handbrake: bool,
 }
@@ -272,6 +272,7 @@ impl Car {
             steer: 0.0,
             throttle: 0.0,
             brake: 0.0,
+            clutch: 0.0,
             steer_in: 0.0,
             handbrake: false,
         }
@@ -282,15 +283,42 @@ impl Car {
         self.threaded = on;
     }
 
-    pub fn set_input(&mut self, throttle: f32, brake: f32, steer: f32, handbrake: bool, reset: bool) {
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_input(
+        &mut self,
+        throttle: f32,
+        brake: f32,
+        steer: f32,
+        handbrake: bool,
+        reset: bool,
+        clutch: f32,
+    ) {
         if reset {
             self.reset();
             return;
         }
         self.throttle = throttle.clamp(0.0, 1.0);
         self.brake = brake.clamp(0.0, 1.0);
+        self.clutch = clutch.clamp(0.0, 1.0);
         self.steer_in = steer.clamp(-1.0, 1.0);
         self.handbrake = handbrake;
+    }
+
+    /// Manual-gearbox controls (no-ops in auto mode, except the mode toggle).
+    pub fn shift_up(&mut self) {
+        self.drivetrain.shift_up();
+    }
+    pub fn shift_down(&mut self) {
+        self.drivetrain.shift_down();
+    }
+    pub fn toggle_manual(&mut self) {
+        self.drivetrain.toggle_manual();
+    }
+    pub fn is_manual(&self) -> bool {
+        self.drivetrain.mode == Mode::Manual
+    }
+    pub fn clutch_engagement(&self) -> f32 {
+        self.drivetrain.clutch
     }
 
     pub fn reset(&mut self) {
@@ -316,9 +344,8 @@ impl Car {
         let target = self.steer_in * MAX_STEER;
         self.steer += (target - self.steer) * (STEER_RATE * dt).min(1.0);
 
-        // Frame + body velocity (read before mutable borrows).
+        // Frame (read before mutable borrows).
         let (fwd, right, up) = self.frame();
-        let v_long_body = self.avg_velocity().dot(fwd);
 
         // Plastic deformation + breaking (uses last substep's positions).
         solver::update_beams(&mut self.structure, &self.params);
@@ -364,7 +391,9 @@ impl Car {
             collision::apply_self_collision(&mut self.structure.nodes, conn);
         }
 
-        // Drivetrain: torque from average driven-wheel speed.
+        // Drivetrain: engine/clutch/gearbox produce a total drive torque; the open
+        // differential splits it equally across the driven wheels (each wheel then
+        // free to spin at its own speed — the engine sees their average).
         let (mut sum, mut nd) = (0.0f32, 0u32);
         for w in &self.wheels {
             if w.driven {
@@ -373,10 +402,14 @@ impl Car {
             }
         }
         let avg_omega = if nd > 0 { sum / nd as f32 } else { 0.0 };
-        let total_drive = self.drivetrain.update(self.throttle, avg_omega, dt);
+        let total_drive =
+            self.drivetrain
+                .update(self.throttle, self.brake, self.clutch, avg_omega, dt);
         let per_drive = if nd > 0 { total_drive / nd as f32 } else { 0.0 };
 
-        let reversing = self.throttle < 0.05 && self.brake > 0.05 && v_long_body < 1.0;
+        // In auto-reverse the brake pedal is acting as reverse throttle, so the
+        // friction brakes are suppressed (handbrake still bites).
+        let suppress_brake = self.drivetrain.auto_reversing();
 
         // Snapshot scalar controls for the loop (avoid borrow conflicts).
         let (steer, brake, handbrake) = (self.steer, self.brake, self.handbrake);
@@ -395,14 +428,10 @@ impl Car {
             let v_long = v.dot(heading);
             let v_lat = v.dot(lat);
 
-            // Per-wheel drive / brake.
-            let mut drive_tq = if w.driven { per_drive } else { 0.0 };
+            // Per-wheel drive (open diff) / friction brake.
+            let drive_tq = if w.driven { per_drive } else { 0.0 };
             let mut brake_tq = 0.0;
-            if reversing {
-                if w.driven {
-                    drive_tq = -REVERSE_TORQUE;
-                }
-            } else if brake > 0.05 {
+            if brake > 0.05 && !suppress_brake {
                 brake_tq = BRAKE_TORQUE * brake;
             }
             if handbrake && !w.steerable {
@@ -502,8 +531,9 @@ impl Car {
         self.drivetrain.rpm
     }
 
-    pub fn gear(&self) -> u32 {
-        self.drivetrain.gear as u32 + 1
+    /// Current gear: -1 = reverse, 0 = neutral, 1..=6 forward.
+    pub fn gear(&self) -> i32 {
+        self.drivetrain.gear
     }
 
     pub fn node_count(&self) -> usize {
@@ -610,7 +640,7 @@ mod tests {
     #[test]
     fn car_settles_upright_on_its_wheels() {
         let mut car = Car::new();
-        car.set_input(0.0, 0.0, 0.0, false, false);
+        car.set_input(0.0, 0.0, 0.0, false, false, 0.0);
         frames(&mut car, 120); // ~2 s
 
         let (_f, _r, up) = car.frame();
@@ -628,11 +658,11 @@ mod tests {
     #[test]
     fn car_accelerates_forward_then_brakes() {
         let mut car = Car::new();
-        car.set_input(0.0, 0.0, 0.0, false, false);
+        car.set_input(0.0, 0.0, 0.0, false, false, 0.0);
         frames(&mut car, 60); // settle
 
         let start = car.centroid();
-        car.set_input(1.0, 0.0, 0.0, false, false); // full throttle
+        car.set_input(1.0, 0.0, 0.0, false, false, 0.0); // full throttle
         frames(&mut car, 180); // ~3 s
         let v = car.speed_kmh();
         assert!(v > 10.0, "car should accelerate under throttle (got {} km/h)", v);
@@ -644,7 +674,7 @@ mod tests {
 
         // Braking slows it down. Capture the minimum speed over the window, since
         // holding the brake past a stop intentionally engages auto-reverse.
-        car.set_input(0.0, 1.0, 0.0, false, false);
+        car.set_input(0.0, 1.0, 0.0, false, false, 0.0);
         let mut min_speed = v;
         let per_frame = (SUBSTEP_HZ / 60.0).round() as u32;
         for _ in 0..60 {
@@ -704,10 +734,10 @@ mod tests {
     fn car_steers() {
         let mut car = Car::new();
         frames(&mut car, 60);
-        car.set_input(0.8, 0.0, 0.0, false, false);
+        car.set_input(0.8, 0.0, 0.0, false, false, 0.0);
         frames(&mut car, 120); // get moving
         let h0 = car.forward();
-        car.set_input(0.8, 0.0, 1.0, false, false); // steer
+        car.set_input(0.8, 0.0, 1.0, false, false, 0.0); // steer
         frames(&mut car, 120);
         let h1 = car.forward();
         let yaw_change = (h1.z.atan2(h1.x) - h0.z.atan2(h0.x)).abs();

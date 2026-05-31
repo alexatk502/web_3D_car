@@ -30,6 +30,8 @@ export class UI {
       hudGear: document.getElementById("hudGear"),
       hudCam: document.getElementById("hudCam"),
       hudRes: document.getElementById("hudRes"),
+      hudMode: document.getElementById("hudMode"),
+      hudClutch: document.getElementById("hudClutch"),
       hudThreads: document.getElementById("hudThreads"),
       hudNodes: document.getElementById("hudNodes"),
       hudBeams: document.getElementById("hudBeams"),
@@ -85,15 +87,21 @@ export class UI {
     this.el.backendName.textContent = name;
   }
 
-  updateHUD({ fps, ms, tris, speed, rpm, gear, cam, resW, resH, threads, nodes, beams, substeps }) {
+  updateHUD({ fps, ms, tris, speed, rpm, gear, cam, resW, resH, threads, nodes, beams, substeps, manual, clutch }) {
     this.el.hudFps.textContent = fps.toFixed(0);
     this.el.hudMs.textContent = ms.toFixed(1);
     this.el.hudTris.textContent = tris.toLocaleString();
     this.el.hudSpeed.textContent = speed.toFixed(0);
     this.el.hudRpm.textContent = rpm.toFixed(0);
-    this.el.hudGear.textContent = gear;
+    // Gear label: -1 = R, 0 = N, else the number.
+    this.el.hudGear.textContent = gear < 0 ? "R" : gear === 0 ? "N" : String(gear);
     this.el.hudCam.textContent = CAM_NAMES[cam] || "?";
     this.el.hudRes.textContent = resW + "×" + resH;
+    if (manual !== undefined) this.el.hudMode.textContent = manual ? "MANUAL" : "AUTO";
+    if (clutch !== undefined) {
+      // Only meaningful in manual; show engagement %.
+      this.el.hudClutch.textContent = manual ? Math.round(clutch * 100) + "%" : "—";
+    }
     if (threads !== undefined) this.el.hudThreads.textContent = threads;
     if (nodes !== undefined) this.el.hudNodes.textContent = nodes;
     if (beams !== undefined) this.el.hudBeams.textContent = beams;
