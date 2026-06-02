@@ -128,11 +128,14 @@ async function main() {
     // One body instance per car (own reused interleaved buffer); all share the
     // same skinning data since the structure is identical.
     bodies = Array.from({ length: carCount }, () => buildCarBody(carDesc));
+    const bodyColors = [];
+    for (let c = 0; c < carCount; c++) bodyColors.push(world.car_color(c)); // [r,g,b] per car
     backend.setBody({
       maxVerts: bodies[0].vCount,
       triIndices: bodies[0].triIndices,
       color: bodies[0].color,
       count: carCount,
+      colors: bodyColors,
     });
 
     // Deformable tire meshes: one per wheel, skinned from the tread ring nodes.
@@ -303,6 +306,7 @@ async function main() {
         substeps: world.substeps_last_frame(),
         manual: world.is_manual(),
         clutch: world.clutch(),
+        vehicle: world.vehicle_name(),
       });
     }
     requestAnimationFrame(frame);

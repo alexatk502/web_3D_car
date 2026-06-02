@@ -10,7 +10,7 @@
 
 const IDLE_RPM: f32 = 900.0;
 const REDLINE_RPM: f32 = 6800.0;
-const PEAK_TORQUE: f32 = 320.0; // N·m at the crank
+const DEFAULT_PEAK_TORQUE: f32 = 320.0; // N·m at the crank (used by test ctor)
 const PEAK_RPM_FRAC: f32 = 0.55; // torque peak at 55% of redline
 const FINAL_DRIVE: f32 = 3.7;
 const GEARS: [f32; 6] = [3.6, 2.4, 1.7, 1.25, 0.95, 0.78];
@@ -44,10 +44,11 @@ pub struct Drivetrain {
     engine_omega: f32, // rad/s
     shift_timer: f32,
     declutch_timer: f32,
+    peak_torque: f32, // per-vehicle engine peak torque (N·m at the crank)
 }
 
 impl Drivetrain {
-    pub fn new() -> Self {
+    pub fn new(peak_torque: f32) -> Self {
         Drivetrain {
             gear: 1,
             rpm: IDLE_RPM,
@@ -56,6 +57,7 @@ impl Drivetrain {
             engine_omega: IDLE_RPM / RAD_S_TO_RPM,
             shift_timer: 0.0,
             declutch_timer: 0.0,
+            peak_torque,
         }
     }
 
@@ -190,7 +192,7 @@ impl Drivetrain {
         }
 
         // Engine dynamics: throttle torque + idle governor − drag − clutch load.
-        let t_throttle = eff_throttle * PEAK_TORQUE * Self::torque_factor(self.rpm);
+        let t_throttle = eff_throttle * self.peak_torque * Self::torque_factor(self.rpm);
         let t_idle = if self.rpm < IDLE_RPM * 1.15 {
             IDLE_TORQUE * ((IDLE_RPM - self.rpm) / IDLE_RPM).max(0.0)
         } else {
@@ -233,7 +235,7 @@ mod tests {
 
     #[test]
     fn auto_full_throttle_drives_forward() {
-        let mut d = Drivetrain::new(); // Auto, gear 1
+        let mut d = Drivetrain::new(DEFAULT_PEAK_TORQUE); // Auto, gear 1
         // Wheels barely turning, full throttle: clutch should transmit forward torque.
         let tq = run(&mut d, 1.0, 0.0, 0.0, 2.0, 200);
         assert!(tq > 0.0, "auto full throttle should drive forward, got {}", tq);
@@ -243,7 +245,7 @@ mod tests {
 
     #[test]
     fn clutch_disengaged_transmits_no_drive_but_engine_revs() {
-        let mut d = Drivetrain::new();
+        let mut d = Drivetrain::new(DEFAULT_PEAK_TORQUE);
         d.set_manual(true); // drops to neutral
         d.shift_up(); // N -> 1
         assert_eq!(d.gear, 1);
@@ -255,7 +257,7 @@ mod tests {
 
     #[test]
     fn manual_reverse_gives_negative_wheel_torque() {
-        let mut d = Drivetrain::new();
+        let mut d = Drivetrain::new(DEFAULT_PEAK_TORQUE);
         d.set_manual(true); // neutral
         d.shift_down(); // N -> R
         assert_eq!(d.gear, -1);
@@ -265,7 +267,7 @@ mod tests {
 
     #[test]
     fn neutral_revs_free_no_drive() {
-        let mut d = Drivetrain::new();
+        let mut d = Drivetrain::new(DEFAULT_PEAK_TORQUE);
         d.set_manual(true); // neutral (gear 0)
         assert_eq!(d.gear, 0);
         let tq = run(&mut d, 1.0, 0.0, 0.0, 0.0, 1000);
@@ -275,7 +277,7 @@ mod tests {
 
     #[test]
     fn off_throttle_engine_braking_is_negative() {
-        let mut d = Drivetrain::new(); // Auto, gear 1
+        let mut d = Drivetrain::new(DEFAULT_PEAK_TORQUE); // Auto, gear 1
         // Spin engine up first, then coast at speed with no throttle: clutch should
         // back-drive the (slower) engine, i.e. deliver negative (braking) torque.
         run(&mut d, 1.0, 0.0, 0.0, 60.0, 200);

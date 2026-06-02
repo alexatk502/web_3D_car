@@ -9,6 +9,7 @@ use crate::scene::{self, ObstacleBox};
 use crate::softbody::drivetrain::{Drivetrain, Mode};
 use crate::softbody::solver::{self, SolverParams};
 use crate::softbody::structure::{BeamKind, Beams, Nodes, Structure};
+use crate::softbody::vehicle::VehicleSpec;
 use crate::softbody::{collision, tire, tire_body};
 use glam::{Mat3, Quat, Vec3};
 use std::collections::HashSet;
@@ -40,15 +41,12 @@ const PAR_SELF_THRESHOLD: usize = 80;
 // Strong damping (not extreme stiffness) is what kills the jelly wobble: the old
 // 1 kHz rate couldn't damp hard enough so stiff beams just rang. At 2 kHz we damp
 // to ~0.45 of critical, so a moderate stiffness feels solid AND still crumples.
-const CHASSIS_K: f32 = 650_000.0; // axis-beam stiffness (rigid to drive, still crushable)
-const CHASSIS_DIAG: f32 = 1.6; // diagonal beams = CHASSIS_K * this — the shear/torsion bracing
-// Damping is capped by stability (~18*CHASSIS_D*inv_mass*dt < 2). The finer grid
-// uses lighter nodes, which lowers that cap, so CHASSIS_D drops too — but the
-// damping *ratio* (~0.5, what kills the jelly) is preserved.
-const CHASSIS_D: f32 = 1_500.0; // strong damping (stable at 2 kHz, mass 8)
-const CHASSIS_NODE_MASS: f32 = 8.0; // ~96*8 = 768 kg chassis
-const CHASSIS_DEFORM: f32 = 0.025; // dents past ~2.5% strain (crumples easily, still elastic when driving)
-const CHASSIS_BREAK: f32 = 0.30; // severs past 30% strain (hard crashes)
+// Chassis stiffness/mass/crumple are per-vehicle (see VehicleSpec); geometry is
+// shared/global. Damping is derived as node_mass * CHASSIS_D_PER_MASS so the
+// per-node explicit-stability ratio (18*D*inv_mass*dt) is constant across
+// vehicles — this reproduces D=1500 for the Sport's mass-8 nodes.
+const CHASSIS_DIAG: f32 = 1.6; // diagonal beams = chassis_k * this — shear/torsion bracing
+const CHASSIS_D_PER_MASS: f32 = 187.5;
 
 // A long-range skeleton tying the 8 cage corners together. Adjacent-cell beams
 // alone leave the cage free to shear/twist globally (a big part of the "jelly"
@@ -83,7 +81,6 @@ const WHEEL_INERTIA: f32 = 1.2; // ~0.5*m*r^2
 const MAX_STEER: f32 = 0.5; // radians
 const STEER_RATE: f32 = 5.0;
 
-const TIRE_MU: f32 = 1.7; // grippy arcade-sim
 const WHEEL_CONTACT_K: f32 = 180_000.0;
 const WHEEL_CONTACT_D: f32 = 4_000.0;
 
@@ -113,6 +110,7 @@ pub struct Car {
     pub wheels: Vec<Wheel>,
     pub drivetrain: Drivetrain,
     obstacles: Vec<ObstacleBox>,
+    spec: VehicleSpec, // per-vehicle physics + colour
     chassis_n: usize, // number of chassis grid nodes (the first nodes in the array)
     // Reference node groups used to derive the (deformable) car frame.
     front: Vec<u32>,
@@ -138,15 +136,30 @@ pub struct Car {
 }
 
 impl Car {
-    /// Build the default car at the origin, facing +X.
+    /// Build the default (Sport) car at the origin, facing +X.
     pub fn new() -> Self {
-        Self::new_at(Vec3::ZERO, 0.0)
+        Self::from_spec(VehicleSpec::sport(), Vec3::ZERO, 0.0)
     }
 
-    /// Build a car spawned at world `pos` (x,z used; y from terrain + lift) with
-    /// heading `yaw` (radians about +Y). The spawn snapshot is taken AFTER the
-    /// transform, so `reset()` returns the car to this pose.
+    /// Build the default (Sport) car at a spawn pose.
     pub fn new_at(pos: Vec3, yaw: f32) -> Self {
+        Self::from_spec(VehicleSpec::sport(), pos, yaw)
+    }
+
+    /// Build a car from a `VehicleSpec` (physics + colour) at world `pos`
+    /// (x,z used; y from terrain + lift) with heading `yaw`. Geometry is shared
+    /// across specs. The spawn snapshot is taken AFTER the transform, so
+    /// `reset()` returns the car to this pose.
+    pub fn from_spec(spec: VehicleSpec, pos: Vec3, yaw: f32) -> Self {
+        // Per-vehicle physics (geometry stays shared/global).
+        let node_mass = spec.chassis_node_mass;
+        let chassis_k = spec.chassis_k;
+        // Damping scaled with mass keeps the per-node explicit-stability ratio
+        // constant across vehicles (and reproduces 1500 for the Sport's mass 8).
+        let chassis_d = node_mass * CHASSIS_D_PER_MASS;
+        let chassis_deform = spec.chassis_deform;
+        let chassis_break = spec.chassis_break;
+
         let mut nodes = Nodes::default();
         let mut beams = Beams::default();
 
@@ -164,7 +177,7 @@ impl Car {
                     let x = lerp(CAGE_MIN[0], CAGE_MAX[0], xi, CHASSIS_NX);
                     let y = lerp(CAGE_MIN[1], CAGE_MAX[1], yi, CHASSIS_NY);
                     let z = lerp(CAGE_MIN[2], CAGE_MAX[2], zi, CHASSIS_NZ);
-                    let id = nodes.push([x, y, z], CHASSIS_NODE_MASS, 0.12);
+                    let id = nodes.push([x, y, z], node_mass, 0.12);
                     grid[gidx(xi, yi, zi)] = id;
                     chassis.push(id);
                     // Frame groups: the extreme faces give robust forward/right axes.
@@ -202,8 +215,8 @@ impl Car {
                                 let b = grid[gidx(nxi, nyi, nzi)];
                                 let order = dx + dy + dz; // 1 axis, 2 face-diag, 3 body-diag
                                 // Diagonals stiffer than axis beams (shear bracing).
-                                let k = if order == 1 { CHASSIS_K } else { CHASSIS_K * CHASSIS_DIAG };
-                                connect(&mut nodes, &mut beams, a, b, k, CHASSIS_D, CHASSIS_DEFORM, CHASSIS_BREAK);
+                                let k = if order == 1 { chassis_k } else { chassis_k * CHASSIS_DIAG };
+                                connect(&mut nodes, &mut beams, a, b, k, chassis_d, chassis_deform, chassis_break);
                             }
                         }
                     }
@@ -283,12 +296,14 @@ impl Car {
         // so its stiff chassis/suspension beams stay stable and well-damped.
         let mut params = SolverParams::default();
         params.substep_dt = 1.0 / SUBSTEP_HZ;
+        let drivetrain = Drivetrain::new(spec.peak_torque);
         Car {
             structure,
             params,
             wheels,
-            drivetrain: Drivetrain::new(),
+            drivetrain,
             obstacles: scene::obstacle_boxes(),
+            spec,
             chassis_n: chassis.len(),
             front,
             rear,
@@ -455,6 +470,7 @@ impl Car {
 
         // Snapshot scalar controls for the loop (avoid borrow conflicts).
         let (steer, brake, handbrake) = (self.steer, self.brake, self.handbrake);
+        let tire_mu = self.spec.tire_mu;
         let nodes = &mut self.structure.nodes;
         let beams = &self.structure.beams; // for tire blowout detection (disjoint field)
         let wheels = &mut self.wheels;
@@ -492,7 +508,7 @@ impl Car {
                 let fz = (WHEEL_CONTACT_K * pen - WHEEL_CONTACT_D * vn).max(0.0);
 
                 // Surface grip at the contact patch (tarmac=1, ice/gravel<1).
-                let mu = TIRE_MU * scene::surface_friction(p.x, p.z);
+                let mu = tire_mu * scene::surface_friction(p.x, p.z);
 
                 let denom = v_long.abs() + 1.0; // +1 tames low-speed singularities
                 let kappa = (w.omega * w.radius - v_long) / denom;
@@ -640,6 +656,14 @@ impl Car {
         (CAGE_MIN, CAGE_MAX)
     }
 
+    /// This vehicle's body colour (per spec) and display name.
+    pub fn body_color(&self) -> [f32; 3] {
+        self.spec.body_color
+    }
+    pub fn vehicle_name(&self) -> String {
+        self.spec.name.clone()
+    }
+
     /// Number of chassis grid nodes — the first `chassis_count` nodes (the body
     /// skins to these; hub + tread nodes follow them).
     pub fn chassis_count(&self) -> usize {
@@ -766,6 +790,30 @@ mod tests {
                     WHEEL_RADIUS
                 );
             }
+        }
+    }
+
+    #[test]
+    fn presets_build_settle_and_drive() {
+        // Each built-in preset must settle upright and accelerate under throttle.
+        for spec in VehicleSpec::presets() {
+            let name = spec.name.clone();
+            let mut car = Car::from_spec(spec, Vec3::ZERO, 0.0);
+            frames(&mut car, 120); // settle
+            let (_f, _r, up) = car.frame();
+            assert!(up.y > 0.7, "{} should settle upright (up.y={})", name, up.y);
+            for i in 0..car.structure.nodes.len() {
+                assert!(car.structure.nodes.py[i].is_finite(), "{} went non-finite", name);
+            }
+            let start = car.centroid();
+            car.set_input(1.0, 0.0, 0.0, false, false, 0.0);
+            frames(&mut car, 180);
+            assert!(
+                (car.centroid() - start).x > 2.0,
+                "{} should drive forward (moved.x={})",
+                name,
+                (car.centroid() - start).x
+            );
         }
     }
 

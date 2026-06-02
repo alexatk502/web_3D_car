@@ -98,7 +98,7 @@ export class WebGLBackend {
   }
 
   // Dynamic skinned car body: static triangle topology, per-frame vertices.
-  setBody({ maxVerts, triIndices, color }) {
+  setBody({ maxVerts, triIndices, color, colors }) {
     const gl = this.gl;
     const vao = gl.createVertexArray();
     gl.bindVertexArray(vao);
@@ -113,7 +113,7 @@ export class WebGLBackend {
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, triBuf);
     gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, triIndices, gl.STATIC_DRAW);
     gl.bindVertexArray(null);
-    this.body = { vao, vbo, color, triCount: triIndices.length };
+    this.body = { vao, vbo, color, colors: colors || null, triCount: triIndices.length };
   }
 
   // Dynamic deformable-tire mesh template (one shared topology, drawn per wheel).
@@ -166,11 +166,13 @@ export class WebGLBackend {
     if (this.body && opts && opts.body && opts.body.interleavedList) {
       gl.disable(gl.CULL_FACE);
       gl.uniformMatrix4fv(this.loc.model, false, IDENTITY);
-      gl.uniform3fv(this.loc.color, this.body.color);
       gl.bindVertexArray(this.body.vao);
       gl.bindBuffer(gl.ARRAY_BUFFER, this.body.vbo);
-      for (const interleaved of opts.body.interleavedList) {
-        gl.bufferSubData(gl.ARRAY_BUFFER, 0, interleaved);
+      const colors = this.body.colors;
+      const list = opts.body.interleavedList;
+      for (let c = 0; c < list.length; c++) {
+        gl.uniform3fv(this.loc.color, colors ? colors[c] || this.body.color : this.body.color);
+        gl.bufferSubData(gl.ARRAY_BUFFER, 0, list[c]);
         gl.drawElements(gl.TRIANGLES, this.body.triCount, gl.UNSIGNED_SHORT, 0);
       }
       gl.enable(gl.CULL_FACE);

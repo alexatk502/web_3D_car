@@ -9,6 +9,7 @@ pub mod solver;
 pub mod structure;
 pub mod tire;
 pub mod tire_body;
+pub mod vehicle;
 
 use solver::SolverParams;
 use structure::Structure;

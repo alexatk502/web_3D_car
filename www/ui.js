@@ -36,6 +36,7 @@ export class UI {
       hudRes: document.getElementById("hudRes"),
       hudMode: document.getElementById("hudMode"),
       hudClutch: document.getElementById("hudClutch"),
+      hudVeh: document.getElementById("hudVeh"),
       hudThreads: document.getElementById("hudThreads"),
       hudNodes: document.getElementById("hudNodes"),
       hudBeams: document.getElementById("hudBeams"),
@@ -99,7 +100,7 @@ export class UI {
     this.el.backendName.textContent = name;
   }
 
-  updateHUD({ fps, ms, tris, speed, rpm, gear, cam, resW, resH, threads, nodes, beams, substeps, manual, clutch }) {
+  updateHUD({ fps, ms, tris, speed, rpm, gear, cam, resW, resH, threads, nodes, beams, substeps, manual, clutch, vehicle }) {
     this.el.hudFps.textContent = fps.toFixed(0);
     this.el.hudMs.textContent = ms.toFixed(1);
     this.el.hudTris.textContent = tris.toLocaleString();
@@ -114,6 +115,7 @@ export class UI {
       // Only meaningful in manual; show engagement %.
       this.el.hudClutch.textContent = manual ? Math.round(clutch * 100) + "%" : "—";
     }
+    if (vehicle !== undefined) this.el.hudVeh.textContent = vehicle;
     if (threads !== undefined) this.el.hudThreads.textContent = threads;
     if (nodes !== undefined) this.el.hudNodes.textContent = nodes;
     if (beams !== undefined) this.el.hudBeams.textContent = beams;

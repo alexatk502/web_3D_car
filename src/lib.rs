@@ -19,6 +19,7 @@ use rapier3d::prelude::*;
 use render_state::RenderBuffer;
 use scene::descriptor_json;
 use softbody::car::Car;
+use softbody::vehicle::VehicleSpec;
 use wasm_bindgen::prelude::*;
 
 // Browser thread-pool initializer (Web Workers + SharedArrayBuffer). JS must
@@ -46,6 +47,7 @@ pub struct World {
     physics: Physics,
     cars: Vec<Car>,
     active: usize, // the car the camera follows / input drives
+    spawn_seq: usize, // rotates through presets on each spawn
     camera: Camera,
     static_handles: Vec<RigidBodyHandle>,
     descriptor: String,
@@ -88,6 +90,7 @@ impl World {
             physics,
             cars: vec![car],
             active: 0,
+            spawn_seq: 1, // first spawn = preset 1 (player's default car is preset 0)
             camera: Camera::new(),
             static_handles,
             descriptor,
@@ -169,27 +172,59 @@ impl World {
         self.node_offsets.get(c).copied().unwrap_or(0)
     }
 
-    /// Spawn another car at world (x, z) with heading `yaw`. Grows the buffers;
-    /// JS must re-read sizes/descriptors and rebuild its meshes afterwards.
-    pub fn spawn_car(&mut self, x: f32, z: f32, yaw: f32) {
-        let mut car = Car::new_at(Vec3::new(x, 0.0, z), yaw);
+    /// Spawn a car from a `VehicleSpec` at world (x, z) with heading `yaw`. Grows
+    /// the buffers; JS must re-read sizes/descriptors and rebuild meshes after.
+    fn spawn_spec(&mut self, spec: VehicleSpec, x: f32, z: f32, yaw: f32) {
+        if self.cars.len() >= 8 {
+            return;
+        }
+        let mut car = Car::from_spec(spec, Vec3::new(x, 0.0, z), yaw);
         car.set_threaded(self.cars.first().map(|c| c.is_threaded()).unwrap_or(false));
         self.cars.push(car);
         self.rebuild_layout();
     }
 
-    /// Spawn a car relative to the active car's frame: `ahead` metres forward and
-    /// `side` metres to its right, facing the same heading. Capped at 8 cars.
+    /// Spawn a built-in preset (sport/van/hatch) near the active car: `ahead`
+    /// metres forward, `side` to its right, same heading. Cycles through the
+    /// presets on successive calls. Capped at 8 cars.
     pub fn spawn_near_active(&mut self, ahead: f32, side: f32) {
         if self.cars.len() >= 8 {
             return;
         }
+        let (x, z, yaw) = self.spawn_pose(ahead, side);
+        let presets = VehicleSpec::presets();
+        // First spawn → preset 1 (the player's default car is preset 0 = Sport).
+        let spec = presets[self.spawn_seq % presets.len()].clone();
+        self.spawn_seq += 1;
+        self.spawn_spec(spec, x, z, yaw);
+    }
+
+    /// Spawn a custom vehicle from a JSON `VehicleSpec` (modding hook). Missing
+    /// fields fall back to the Sport defaults; malformed JSON throws.
+    pub fn spawn_car_json(&mut self, json: &str, ahead: f32, side: f32) -> Result<(), String> {
+        let spec = VehicleSpec::from_json(json)?;
+        let (x, z, yaw) = self.spawn_pose(ahead, side);
+        self.spawn_spec(spec, x, z, yaw);
+        Ok(())
+    }
+
+    /// World pose `ahead`/`side` of the active car, facing its heading.
+    fn spawn_pose(&self, ahead: f32, side: f32) -> (f32, f32, f32) {
         let c = self.cars[self.active].centroid();
         let f = self.cars[self.active].forward();
         let right = Vec3::new(-f.z, 0.0, f.x); // forward rotated -90° about +Y
         let pos = c + f * ahead + right * side;
-        let yaw = f.z.atan2(f.x);
-        self.spawn_car(pos.x, pos.z, yaw);
+        (pos.x, pos.z, f.z.atan2(f.x))
+    }
+
+    /// Active car's vehicle name (HUD).
+    pub fn vehicle_name(&self) -> String {
+        self.cars[self.active].vehicle_name()
+    }
+
+    /// Body colour [r,g,b] of car `c` (for per-car render colour).
+    pub fn car_color(&self, c: usize) -> Vec<f32> {
+        self.cars.get(c).map(|car| car.body_color().to_vec()).unwrap_or_else(|| vec![0.8, 0.16, 0.16])
     }
 
     /// Which car the camera follows and input drives.
@@ -531,11 +566,12 @@ impl World {
 fn car_descriptor_json(car: &Car) -> String {
     let (radius, half_width) = car.wheel_dims();
     let (cmin, cmax) = car.cage();
+    let col = car.body_color();
     let mut s = format!(
         "{{\"wheelRadius\":{},\"wheelHalfWidth\":{},\"wheelColor\":[0.08,0.08,0.10],\
-         \"bodyColor\":[0.80,0.16,0.16],\"wheelCount\":{},\"treadN\":{},\
+         \"bodyColor\":[{},{},{}],\"wheelCount\":{},\"treadN\":{},\
          \"cageMin\":[{},{},{}],\"cageMax\":[{},{},{}],\"chassisCount\":{},\"chassisRest\":[",
-        radius, half_width, car.wheel_count(), softbody::tire_body::TREAD_N,
+        radius, half_width, col[0], col[1], col[2], car.wheel_count(), softbody::tire_body::TREAD_N,
         cmin[0], cmin[1], cmin[2], cmax[0], cmax[1], cmax[2], car.chassis_count()
     );
     for (k, v) in car.chassis_rest().iter().enumerate() {

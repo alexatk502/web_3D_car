@@ -196,10 +196,17 @@ export class WebGPUBackend {
   // separate vertex buffers (one per car) — multiple writeBuffer() calls to the
   // SAME buffer within a render pass would collapse to the last write, so each
   // car needs its own buffer.
-  setBody({ maxVerts, triIndices, color, count }) {
+  setBody({ maxVerts, triIndices, color, count, colors }) {
     const dev = this.device;
     const n = Math.max(1, count || 1);
     const vbos = [];
+    const bgs = []; // one bind group per car (identity model + that car's colour)
+    const ident = new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1]);
+    const triBuf = dev.createBuffer({
+      size: align4(triIndices.byteLength),
+      usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
+    });
+    dev.queue.writeBuffer(triBuf, 0, triIndices);
     for (let c = 0; c < n; c++) {
       vbos.push(
         dev.createBuffer({
@@ -207,24 +214,21 @@ export class WebGPUBackend {
           usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
         })
       );
+      const col = (colors && colors[c]) || color;
+      const ubo = dev.createBuffer({
+        size: 80,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+      });
+      dev.queue.writeBuffer(ubo, 0, ident);
+      dev.queue.writeBuffer(ubo, 64, new Float32Array([col[0], col[1], col[2], 1.0]));
+      bgs.push(
+        dev.createBindGroup({
+          layout: this.objBGL,
+          entries: [{ binding: 0, resource: { buffer: ubo } }],
+        })
+      );
     }
-    const triBuf = dev.createBuffer({
-      size: align4(triIndices.byteLength),
-      usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
-    });
-    dev.queue.writeBuffer(triBuf, 0, triIndices);
-    const ubo = dev.createBuffer({
-      size: 80,
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-    });
-    const ident = new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1]);
-    dev.queue.writeBuffer(ubo, 0, ident);
-    dev.queue.writeBuffer(ubo, 64, new Float32Array([...color, 1.0]));
-    const bg = dev.createBindGroup({
-      layout: this.objBGL,
-      entries: [{ binding: 0, resource: { buffer: ubo } }],
-    });
-    this.body = { vbos, triBuf, bg, triCount: triIndices.length };
+    this.body = { vbos, triBuf, bgs, triCount: triIndices.length };
   }
 
   // Deformable tire meshes: `count` vertex buffers (one per wheel), shared topo.
@@ -319,11 +323,11 @@ export class WebGPUBackend {
     if (this.body && opts && opts.body && opts.body.interleavedList) {
       pass.setPipeline(this.bodyPipeline);
       pass.setBindGroup(0, this.frameBG);
-      pass.setBindGroup(1, this.body.bg);
       pass.setIndexBuffer(this.body.triBuf, "uint16");
       const list = opts.body.interleavedList;
       for (let c = 0; c < list.length && c < this.body.vbos.length; c++) {
         dev.queue.writeBuffer(this.body.vbos[c], 0, list[c]);
+        pass.setBindGroup(1, this.body.bgs[c]); // this car's colour
         pass.setVertexBuffer(0, this.body.vbos[c]);
         pass.drawIndexed(this.body.triCount);
       }
